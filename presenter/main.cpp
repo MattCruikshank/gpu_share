@@ -3,10 +3,15 @@
 #include "compositor.h"
 #include "../handle_transport/handle_transport.h"
 #include "../shared/shared_handle.h"
+#include "../shared/input_event.h"
 
 #include <SDL3/SDL.h>
 #include <cstdio>
 #include <cstring>
+
+static void forwardEvent(HandleTransport* t, const InputEvent& ev) {
+    t->sendData(&ev, sizeof(ev));
+}
 
 int main(int argc, char* argv[]) {
 #ifdef _WIN32
@@ -76,6 +81,7 @@ int main(int argc, char* argv[]) {
 
     // Main loop
     bool running = true;
+    bool mouseDragging = false;
     while (running) {
         SDL_Event event;
         while (SDL_PollEvent(&event)) {
@@ -85,6 +91,45 @@ int main(int argc, char* argv[]) {
             if (event.type == SDL_EVENT_KEY_DOWN &&
                 event.key.key == SDLK_ESCAPE) {
                 running = false;
+            }
+
+            // Forward input to renderer
+            InputEvent ie{};
+            bool send = false;
+
+            if (event.type == SDL_EVENT_MOUSE_BUTTON_DOWN ||
+                event.type == SDL_EVENT_MOUSE_BUTTON_UP) {
+                ie.type = InputEventType::MouseButton;
+                ie.mouseButton.button = event.button.button;
+                ie.mouseButton.pressed = (event.type == SDL_EVENT_MOUSE_BUTTON_DOWN) ? 1 : 0;
+                ie.mouseButton.x = event.button.x;
+                ie.mouseButton.y = event.button.y;
+                send = true;
+                mouseDragging = (event.type == SDL_EVENT_MOUSE_BUTTON_DOWN &&
+                                 event.button.button == 1);
+            }
+            else if (event.type == SDL_EVENT_MOUSE_MOTION && mouseDragging) {
+                ie.type = InputEventType::MouseMotion;
+                ie.motion.x = event.motion.x;
+                ie.motion.y = event.motion.y;
+                ie.motion.relX = event.motion.xrel;
+                ie.motion.relY = event.motion.yrel;
+                send = true;
+            }
+            else if (event.type == SDL_EVENT_MOUSE_WHEEL) {
+                ie.type = InputEventType::MouseWheel;
+                ie.wheel.scrollY = event.wheel.y;
+                send = true;
+            }
+            else if (event.type == SDL_EVENT_KEY_DOWN || event.type == SDL_EVENT_KEY_UP) {
+                ie.type = (event.type == SDL_EVENT_KEY_DOWN)
+                          ? InputEventType::KeyDown : InputEventType::KeyUp;
+                ie.key.scancode = event.key.scancode;
+                send = true;
+            }
+
+            if (send && hasImportedSurface) {
+                forwardEvent(transport.get(), ie);
             }
         }
 

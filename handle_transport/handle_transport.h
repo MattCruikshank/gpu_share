@@ -27,6 +27,12 @@ public:
     virtual bool recvHandle(SharedMemoryHandle& outHandle,
                             void* data = nullptr, size_t dataLen = 0) = 0;
 
+    // Plain data send/receive (no handle passing, reuses the same connection).
+    virtual bool sendData(const void* data, size_t len) = 0;
+    // Returns false if no data available (non-blocking) or error.
+    // Sets outLen to bytes actually read.
+    virtual bool recvDataNonBlocking(void* data, size_t maxLen, size_t& outLen) = 0;
+
     virtual void close() = 0;
 
     // Cancel a blocking accept(). Safe to call from a signal/ctrl handler.

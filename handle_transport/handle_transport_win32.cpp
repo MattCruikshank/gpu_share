@@ -226,6 +226,29 @@ public:
         return true;
     }
 
+    bool sendData(const void* data, size_t len) override {
+        if (pipeHandle_ == INVALID_HANDLE_VALUE) return false;
+        return writeAll(pipeHandle_, data, static_cast<DWORD>(len));
+    }
+
+    bool recvDataNonBlocking(void* data, size_t maxLen, size_t& outLen) override {
+        outLen = 0;
+        if (pipeHandle_ == INVALID_HANDLE_VALUE) return false;
+
+        DWORD available = 0;
+        if (!PeekNamedPipe(pipeHandle_, nullptr, 0, nullptr, &available, nullptr))
+            return false;
+        if (available == 0) return false;
+
+        DWORD toRead = (available < static_cast<DWORD>(maxLen))
+                        ? available : static_cast<DWORD>(maxLen);
+        DWORD bytesRead = 0;
+        if (!ReadFile(pipeHandle_, data, toRead, &bytesRead, nullptr))
+            return false;
+        outLen = bytesRead;
+        return bytesRead > 0;
+    }
+
     void close() override {
         if (pipeHandle_ != INVALID_HANDLE_VALUE) {
             if (isServer_) {

@@ -191,6 +191,32 @@ public:
         return true;
     }
 
+    bool sendData(const void* data, size_t len) override {
+        if (connFd_ < 0) return false;
+        const char* ptr = static_cast<const char*>(data);
+        size_t remaining = len;
+        while (remaining > 0) {
+            ssize_t n = ::send(connFd_, ptr, remaining, 0);
+            if (n <= 0) return false;
+            ptr += n;
+            remaining -= n;
+        }
+        return true;
+    }
+
+    bool recvDataNonBlocking(void* data, size_t maxLen, size_t& outLen) override {
+        outLen = 0;
+        if (connFd_ < 0) return false;
+        ssize_t n = ::recv(connFd_, data, maxLen, MSG_DONTWAIT);
+        if (n < 0) {
+            if (errno == EAGAIN || errno == EWOULDBLOCK) return false;
+            return false;
+        }
+        if (n == 0) return false;
+        outLen = static_cast<size_t>(n);
+        return true;
+    }
+
     void close() override {
         if (connFd_ >= 0) {
             ::close(connFd_);
