@@ -10,6 +10,8 @@ if(NOT SDL3_FOUND)
         GIT_SHALLOW    TRUE
     )
     set(SDL_VULKAN ON CACHE BOOL "" FORCE)
+    set(SDL_STATIC ON CACHE BOOL "" FORCE)
+    set(SDL_SHARED OFF CACHE BOOL "" FORCE)
     set(SDL_WAYLAND ON CACHE BOOL "" FORCE)
     set(SDL_X11 ON CACHE BOOL "" FORCE)
     FetchContent_MakeAvailable(SDL3)
@@ -33,10 +35,11 @@ target_include_directories(presenter PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/..
 )
 
-target_link_libraries(presenter PRIVATE
-    Vulkan::Vulkan
-    SDL3::SDL3
-)
+if(TARGET SDL3::SDL3-static)
+    target_link_libraries(presenter PRIVATE Vulkan::Vulkan SDL3::SDL3-static)
+else()
+    target_link_libraries(presenter PRIVATE Vulkan::Vulkan SDL3::SDL3)
+endif()
 
 target_compile_features(presenter PRIVATE cxx_std_17)
 
