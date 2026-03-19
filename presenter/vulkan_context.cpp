@@ -336,6 +336,11 @@ bool VulkanContext::createCommandPool() {
 }
 
 bool VulkanContext::createSyncObjects() {
+    uint32_t count = static_cast<uint32_t>(swapchainImages_.size());
+    imageAvailableSemaphores_.resize(count);
+    renderFinishedSemaphores_.resize(count);
+    inFlightFences_.resize(count);
+
     VkSemaphoreCreateInfo semInfo{};
     semInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
 
@@ -343,7 +348,7 @@ bool VulkanContext::createSyncObjects() {
     fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
     fenceInfo.flags = VK_FENCE_CREATE_SIGNALED_BIT;
 
-    for (int i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
+    for (uint32_t i = 0; i < count; i++) {
         VK_CHECK(vkCreateSemaphore(device_, &semInfo, nullptr, &imageAvailableSemaphores_[i]));
         VK_CHECK(vkCreateSemaphore(device_, &semInfo, nullptr, &renderFinishedSemaphores_[i]));
         VK_CHECK(vkCreateFence(device_, &fenceInfo, nullptr, &inFlightFences_[i]));
@@ -363,19 +368,28 @@ void VulkanContext::loadFunctionPointers() {
 }
 
 uint32_t VulkanContext::acquireNextImage() {
-    vkWaitForFences(device_, 1, &inFlightFences_[currentFrame_], VK_TRUE, UINT64_MAX);
-    vkResetFences(device_, 1, &inFlightFences_[currentFrame_]);
-
+    // Use a rotating acquire semaphore. We don't know imageIndex yet,
+    // so use acquireIndex_ to pick a semaphore that's definitely free
+    // (we'll wait on the fence for the returned imageIndex after acquire).
     uint32_t imageIndex = 0;
     VK_CHECK(vkAcquireNextImageKHR(device_, swapchain_, UINT64_MAX,
-        imageAvailableSemaphores_[currentFrame_], VK_NULL_HANDLE, &imageIndex));
+        imageAvailableSemaphores_[acquireIndex_], VK_NULL_HANDLE, &imageIndex));
+
+    // Now we know which image we got — wait for its previous work to finish
+    vkWaitForFences(device_, 1, &inFlightFences_[imageIndex], VK_TRUE, UINT64_MAX);
+    vkResetFences(device_, 1, &inFlightFences_[imageIndex]);
+
+    // Stash which acquire semaphore was used for this image
+    lastAcquireSemaphore_ = imageAvailableSemaphores_[acquireIndex_];
+    acquireIndex_ = (acquireIndex_ + 1) % static_cast<uint32_t>(swapchainImages_.size());
+
     return imageIndex;
 }
 
 void VulkanContext::submitAndPresent(uint32_t imageIndex, VkCommandBuffer cmdBuf) {
-    VkSemaphore waitSemaphores[] = { imageAvailableSemaphores_[currentFrame_] };
+    VkSemaphore waitSemaphores[] = { lastAcquireSemaphore_ };
     VkPipelineStageFlags waitStages[] = { VK_PIPELINE_STAGE_TRANSFER_BIT };
-    VkSemaphore signalSemaphores[] = { renderFinishedSemaphores_[currentFrame_] };
+    VkSemaphore signalSemaphores[] = { renderFinishedSemaphores_[imageIndex] };
 
     VkSubmitInfo submitInfo{};
     submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
@@ -387,7 +401,7 @@ void VulkanContext::submitAndPresent(uint32_t imageIndex, VkCommandBuffer cmdBuf
     submitInfo.signalSemaphoreCount = 1;
     submitInfo.pSignalSemaphores = signalSemaphores;
 
-    VK_CHECK(vkQueueSubmit(queue_, 1, &submitInfo, inFlightFences_[currentFrame_]));
+    VK_CHECK(vkQueueSubmit(queue_, 1, &submitInfo, inFlightFences_[imageIndex]));
 
     VkPresentInfoKHR presentInfo{};
     presentInfo.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
@@ -398,8 +412,6 @@ void VulkanContext::submitAndPresent(uint32_t imageIndex, VkCommandBuffer cmdBuf
     presentInfo.pImageIndices = &imageIndex;
 
     vkQueuePresentKHR(queue_, &presentInfo);
-
-    currentFrame_ = (currentFrame_ + 1) % MAX_FRAMES_IN_FLIGHT;
 }
 
 void VulkanContext::destroy() {
@@ -407,7 +419,7 @@ void VulkanContext::destroy() {
         vkDeviceWaitIdle(device_);
     }
 
-    for (int i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
+    for (size_t i = 0; i < imageAvailableSemaphores_.size(); i++) {
         if (imageAvailableSemaphores_[i]) vkDestroySemaphore(device_, imageAvailableSemaphores_[i], nullptr);
         if (renderFinishedSemaphores_[i]) vkDestroySemaphore(device_, renderFinishedSemaphores_[i], nullptr);
         if (inFlightFences_[i]) vkDestroyFence(device_, inFlightFences_[i], nullptr);

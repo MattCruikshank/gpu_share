@@ -17,8 +17,6 @@
         }                                                                       \
     } while (0)
 
-constexpr int MAX_FRAMES_IN_FLIGHT = 2;
-
 class VulkanContext {
 public:
     bool init(SDL_Window* window);
@@ -35,7 +33,7 @@ public:
     VkExtent2D getSwapchainExtent() const { return swapchainExtent_; }
     VkImage getSwapchainImage(uint32_t index) const { return swapchainImages_[index]; }
     VkCommandBuffer getCommandBuffer(uint32_t index) const { return commandBuffers_[index]; }
-    uint32_t currentFrame() const { return currentFrame_; }
+    uint32_t swapchainImageCount() const { return static_cast<uint32_t>(swapchainImages_.size()); }
 
     // Imported function pointers
 #ifdef _WIN32
@@ -70,10 +68,12 @@ private:
     VkCommandPool commandPool_ = VK_NULL_HANDLE;
     std::vector<VkCommandBuffer> commandBuffers_;
 
-    VkSemaphore imageAvailableSemaphores_[MAX_FRAMES_IN_FLIGHT] = {};
-    VkSemaphore renderFinishedSemaphores_[MAX_FRAMES_IN_FLIGHT] = {};
-    VkFence inFlightFences_[MAX_FRAMES_IN_FLIGHT] = {};
-    uint32_t currentFrame_ = 0;
+    // One set of sync objects per swapchain image, indexed by imageIndex
+    std::vector<VkSemaphore> imageAvailableSemaphores_;
+    std::vector<VkSemaphore> renderFinishedSemaphores_;
+    std::vector<VkFence> inFlightFences_;
+    uint32_t acquireIndex_ = 0;
+    VkSemaphore lastAcquireSemaphore_ = VK_NULL_HANDLE;
 
     VkDebugUtilsMessengerEXT debugMessenger_ = VK_NULL_HANDLE;
 };
