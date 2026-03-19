@@ -43,10 +43,12 @@ static VkImage          g_image         = VK_NULL_HANDLE;
 static VkDeviceMemory   g_memory        = VK_NULL_HANDLE;
 static VkCommandPool    g_commandPool   = VK_NULL_HANDLE;
 static SharedMemoryHandle g_memoryHandle = kInvalidMemoryHandle;
+static HandleTransport* g_transport = nullptr;
 
 #ifdef _WIN32
 static BOOL WINAPI consoleHandler(DWORD) {
     g_running = 0;
+    if (g_transport) g_transport->cancel();
     return TRUE;
 }
 #else
@@ -474,6 +476,7 @@ int main(int argc, char* argv[]) {
     // 7. Send fd to presenter via Unix domain socket
     // -----------------------------------------------------------------------
     auto transport = HandleTransport::create();
+    g_transport = transport.get();
     if (!transport->listen(socketPath)) {
         fprintf(stderr, "Failed to listen on %s\n", socketPath.c_str());
         return 1;

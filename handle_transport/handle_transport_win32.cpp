@@ -62,7 +62,7 @@ public:
 
         pipeHandle_ = CreateNamedPipeA(
             pipeName.c_str(),
-            PIPE_ACCESS_DUPLEX,
+            PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED,
             PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
             1,       // max instances
             4096,    // out buffer size
@@ -87,18 +87,44 @@ public:
             return false;
         }
 
-        if (!ConnectNamedPipe(pipeHandle_, nullptr)) {
+        // Use overlapped I/O so the wait is interruptible via cancelEvent_.
+        cancelEvent_ = CreateEventA(nullptr, TRUE, FALSE, nullptr);
+        OVERLAPPED ov{};
+        ov.hEvent = CreateEventA(nullptr, TRUE, FALSE, nullptr);
+
+        bool connected = false;
+        if (ConnectNamedPipe(pipeHandle_, &ov)) {
+            connected = true;
+        } else {
             DWORD err = GetLastError();
-            // ERROR_PIPE_CONNECTED means the client connected between
-            // CreateNamedPipe and ConnectNamedPipe, which is fine.
-            if (err != ERROR_PIPE_CONNECTED) {
+            if (err == ERROR_PIPE_CONNECTED) {
+                connected = true;
+            } else if (err == ERROR_IO_PENDING) {
+                // Wait for either a client connection or cancellation.
+                HANDLE events[2] = { ov.hEvent, cancelEvent_ };
+                DWORD waited = WaitForMultipleObjects(2, events, FALSE, INFINITE);
+                if (waited == WAIT_OBJECT_0) {
+                    DWORD dummy = 0;
+                    connected = GetOverlappedResult(pipeHandle_, &ov, &dummy, FALSE) != 0;
+                } else {
+                    // Cancelled — cancel the pending I/O.
+                    CancelIoEx(pipeHandle_, &ov);
+                    fprintf(stderr, "Win32HandleTransport::accept: cancelled\n");
+                }
+            } else {
                 fprintf(stderr, "Win32HandleTransport::accept: ConnectNamedPipe "
                         "failed, error %lu\n", err);
-                return false;
             }
         }
 
+        CloseHandle(ov.hEvent);
+
+        if (!connected) return false;
         return exchangePids();
+    }
+
+    void cancel() {
+        if (cancelEvent_) SetEvent(cancelEvent_);
     }
 
     bool connect(const std::string& endpoint) override {
@@ -212,6 +238,10 @@ public:
             CloseHandle(remoteProcess_);
             remoteProcess_ = nullptr;
         }
+        if (cancelEvent_ != nullptr) {
+            CloseHandle(cancelEvent_);
+            cancelEvent_ = nullptr;
+        }
         isServer_ = false;
     }
 
@@ -262,6 +292,7 @@ private:
 
     HANDLE pipeHandle_ = INVALID_HANDLE_VALUE;
     HANDLE remoteProcess_ = nullptr;
+    HANDLE cancelEvent_ = nullptr;
     bool isServer_ = false;
     std::string pipeName_;
 };

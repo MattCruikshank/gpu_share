@@ -29,6 +29,9 @@ public:
 
     virtual void close() = 0;
 
+    // Cancel a blocking accept(). Safe to call from a signal/ctrl handler.
+    virtual void cancel() {}
+
     // Factory: returns platform-appropriate implementation.
     static std::unique_ptr<HandleTransport> create();
 };
