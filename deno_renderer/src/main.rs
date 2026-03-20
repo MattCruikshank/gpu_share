@@ -1202,6 +1202,7 @@ mod transport {
                 loop {
                     match stream.read_exact(&mut buf) {
                         Ok(()) => {
+                            eprintln!("[reader] Got {} bytes, type={}", buf.len(), buf[0]);
                             if tx.send(buf.clone()).is_err() {
                                 break;
                             }
@@ -1632,6 +1633,8 @@ fn main() {
                         let event: InputEvent =
                             unsafe { std::ptr::read(event_data.as_ptr() as *const InputEvent) };
 
+                        eprintln!("[input] Received event type={}", event.event_type);
+
                         // Queue JSON event for TypeScript consumption
                         {
                             let mut gpu = gpu_state.lock().unwrap();
@@ -1640,6 +1643,7 @@ fn main() {
                                     let d: MouseMotionData = unsafe {
                                         std::ptr::read(event.data.as_ptr() as *const MouseMotionData)
                                     };
+                                    eprintln!("[input] mouse_motion x={} y={} dx={} dy={}", d.x, d.y, d.dx, d.dy);
                                     gpu.input_events.push(format!(
                                         r#"{{"type":"mouse_motion","x":{},"y":{},"dx":{},"dy":{}}}"#,
                                         d.x, d.y, d.dx, d.dy
@@ -1649,6 +1653,7 @@ fn main() {
                                     let d: MouseButtonData = unsafe {
                                         std::ptr::read(event.data.as_ptr() as *const MouseButtonData)
                                     };
+                                    eprintln!("[input] mouse_button btn={} pressed={}", d.button, d.pressed);
                                     gpu.input_events.push(format!(
                                         r#"{{"type":"mouse_button","button":{},"pressed":{}}}"#,
                                         d.button, d.pressed
@@ -1658,6 +1663,7 @@ fn main() {
                                     let d: MouseWheelData = unsafe {
                                         std::ptr::read(event.data.as_ptr() as *const MouseWheelData)
                                     };
+                                    eprintln!("[input] mouse_wheel dy={}", d.dy);
                                     gpu.input_events.push(format!(
                                         r#"{{"type":"mouse_wheel","dy":{}}}"#,
                                         d.dy
@@ -1667,6 +1673,7 @@ fn main() {
                                     let d: KeyData = unsafe {
                                         std::ptr::read(event.data.as_ptr() as *const KeyData)
                                     };
+                                    eprintln!("[input] key_down scancode={}", d.scancode);
                                     gpu.input_events.push(format!(
                                         r#"{{"type":"key_down","scancode":{}}}"#,
                                         d.scancode
@@ -1676,6 +1683,7 @@ fn main() {
                                     let d: KeyData = unsafe {
                                         std::ptr::read(event.data.as_ptr() as *const KeyData)
                                     };
+                                    eprintln!("[input] key_up scancode={}", d.scancode);
                                     gpu.input_events.push(format!(
                                         r#"{{"type":"key_up","scancode":{}}}"#,
                                         d.scancode
