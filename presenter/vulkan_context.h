@@ -17,8 +17,6 @@
         }                                                                       \
     } while (0)
 
-constexpr uint32_t MAX_FRAMES_IN_FLIGHT = 2;
-
 class VulkanContext {
 public:
     bool init(SDL_Window* window);
@@ -75,12 +73,12 @@ private:
     VkCommandPool commandPool_ = VK_NULL_HANDLE;
     std::vector<VkCommandBuffer> commandBuffers_;
 
-    // Sync: per frame-in-flight (not per swapchain image)
-    VkSemaphore imageAvailableSemaphores_[MAX_FRAMES_IN_FLIGHT] = {};
-    VkSemaphore renderFinishedSemaphores_[MAX_FRAMES_IN_FLIGHT] = {};
-    VkFence inFlightFences_[MAX_FRAMES_IN_FLIGHT] = {};
-    // Track which frame-in-flight fence is guarding each swapchain image
-    std::vector<VkFence> imagesInFlight_;
+    // Sync: one set per swapchain image, indexed by a rotating frame counter.
+    // Using swapchainImageCount semaphores ensures the presentation engine
+    // has released a semaphore by the time we cycle back to it.
+    std::vector<VkSemaphore> imageAvailableSemaphores_;
+    std::vector<VkSemaphore> renderFinishedSemaphores_;
+    std::vector<VkFence> inFlightFences_;
     uint32_t currentFrame_ = 0;
     bool framebufferResized_ = false;
 

@@ -485,17 +485,19 @@ fn op_gpu_create_render_pipeline(
             .create_shader_module(&frag_module_ci, None)
             .expect("Failed to create fragment shader module");
 
-        let entry_name = c"main"; // naga always outputs "main" as SPIR-V entry point
+        // naga 24 preserves entry point names from WGSL in the SPIR-V
+        let vert_entry_c = std::ffi::CString::new(vert_entry).unwrap();
+        let frag_entry_c = std::ffi::CString::new(frag_entry).unwrap();
 
         let shader_stages = [
             vk::PipelineShaderStageCreateInfo::default()
                 .stage(vk::ShaderStageFlags::VERTEX)
                 .module(vert_module)
-                .name(entry_name),
+                .name(&vert_entry_c),
             vk::PipelineShaderStageCreateInfo::default()
                 .stage(vk::ShaderStageFlags::FRAGMENT)
                 .module(frag_module)
-                .name(entry_name),
+                .name(&frag_entry_c),
         ];
 
         // Vertex input: no buffers by default (shader generates vertices)
