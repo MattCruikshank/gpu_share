@@ -129,12 +129,15 @@ static std::string findExe(const char* presenterArgv0, const std::string& name) 
         }
     }
 
-    // Cargo build: relative to project root — deno_renderer/target/debug/
+    // Cargo build: walk up from exe dir to find <root>/<name>/target/debug/<name>
     if (lastSep != std::string::npos) {
-        // Walk up to find the project root (look for Cargo.toml or CMakeLists.txt)
+        std::string sep(1, path[lastSep]); // use same separator as the path
         std::string dir = path.substr(0, lastSep);
         for (int i = 0; i < 5; i++) {
-            candidate = dir + "/" + name + "/target/debug/" + name + ext;
+            candidate = dir + sep + name + sep + "target" + sep + "debug" + sep + name + ext;
+            if (fileExists(candidate)) return candidate;
+            // Also check release
+            candidate = dir + sep + name + sep + "target" + sep + "release" + sep + name + ext;
             if (fileExists(candidate)) return candidate;
             auto up = dir.find_last_of("/\\");
             if (up == std::string::npos) break;
