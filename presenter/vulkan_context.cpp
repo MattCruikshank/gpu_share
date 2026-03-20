@@ -421,6 +421,9 @@ void VulkanContext::submitAndPresent(uint32_t imageIndex, VkCommandBuffer cmdBuf
         framebufferResized_) {
         framebufferResized_ = false;
         recreateSwapchain();
+        // Don't increment currentFrame_ — recreateSwapchain reset it to 0
+        // and all sync objects were recreated. The next frame starts fresh.
+        return;
     }
 
     currentFrame_ = (currentFrame_ + 1) % MAX_FRAMES_IN_FLIGHT;
