@@ -40,8 +40,11 @@ struct SharedSurfaceInfo {
 struct InputEvent {
     event_type: u8, // InputEventType enum
     padding: [u8; 3],
-    data: [u8; 20], // union payload (parsed based on event_type)
+    data: [u8; 16], // union payload — largest member is motion (4 floats = 16 bytes)
 }
+
+// Must match C++ sizeof(InputEvent) = 20
+const _: () = assert!(std::mem::size_of::<InputEvent>() == 20);
 
 const INPUT_EVENT_NONE: u8 = 0;
 const INPUT_EVENT_MOUSE_MOTION: u8 = 1;

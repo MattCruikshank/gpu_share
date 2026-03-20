@@ -25,4 +25,4 @@ struct InputEvent {
     };
 };
 
-static_assert(sizeof(InputEvent) <= 24, "InputEvent must be small for fast IPC");
+static_assert(sizeof(InputEvent) == 20, "InputEvent size must match Rust side (20 bytes)");
