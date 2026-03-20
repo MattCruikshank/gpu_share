@@ -230,8 +230,11 @@ public:
                 Sleep(10);
             }
 
+            // Restore listen socket to blocking
             u_long blocking = 0;
             ioctlsocket(listenSock_, FIONBIO, &blocking);
+            // Ensure the accepted socket is blocking too
+            ioctlsocket(connSock_, FIONBIO, &blocking);
         }
 #else
         // Use poll() on both listenSock_ and cancelPipe_[0].
@@ -272,6 +275,9 @@ public:
 #ifdef _WIN32
         ensureWinsockInit();
 #endif
+        // Close any socket from a previous failed attempt
+        closeSocket(connSock_);
+
         uint16_t port = static_cast<uint16_t>(std::stoi(endpoint));
 
         connSock_ = ::socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
