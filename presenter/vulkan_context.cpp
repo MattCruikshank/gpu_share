@@ -457,8 +457,18 @@ void VulkanContext::recreateSwapchain() {
         commandBuffers_.clear();
     }
 
+    // Destroy and recreate sync objects — old semaphores may still be
+    // held by the presentation engine for the old swapchain
+    for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
+        if (imageAvailableSemaphores_[i]) vkDestroySemaphore(device_, imageAvailableSemaphores_[i], nullptr);
+        if (renderFinishedSemaphores_[i]) vkDestroySemaphore(device_, renderFinishedSemaphores_[i], nullptr);
+        if (inFlightFences_[i]) vkDestroyFence(device_, inFlightFences_[i], nullptr);
+    }
+
     cleanupSwapchain();
     createSwapchain();
+    createSyncObjects();
+    currentFrame_ = 0;
 
     // Reallocate command buffers for new swapchain image count
     uint32_t count = static_cast<uint32_t>(swapchainImages_.size());
@@ -469,8 +479,6 @@ void VulkanContext::recreateSwapchain() {
     allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
     allocInfo.commandBufferCount = count;
     VK_CHECK(vkAllocateCommandBuffers(device_, &allocInfo, commandBuffers_.data()));
-
-    imagesInFlight_.assign(swapchainImages_.size(), VK_NULL_HANDLE);
 
     fprintf(stderr, "Swapchain recreated: %ux%u\n",
             swapchainExtent_.width, swapchainExtent_.height);
