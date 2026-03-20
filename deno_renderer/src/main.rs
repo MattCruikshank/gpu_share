@@ -43,12 +43,12 @@ struct InputEvent {
     data: [u8; 20], // union payload (parsed based on event_type)
 }
 
-const _INPUT_EVENT_NONE: u8 = 0;
-const _INPUT_EVENT_MOUSE_MOTION: u8 = 1;
-const _INPUT_EVENT_MOUSE_BUTTON: u8 = 2;
-const _INPUT_EVENT_MOUSE_WHEEL: u8 = 3;
-const _INPUT_EVENT_KEY_DOWN: u8 = 4;
-const _INPUT_EVENT_KEY_UP: u8 = 5;
+const INPUT_EVENT_NONE: u8 = 0;
+const INPUT_EVENT_MOUSE_MOTION: u8 = 1;
+const INPUT_EVENT_MOUSE_BUTTON: u8 = 2;
+const INPUT_EVENT_MOUSE_WHEEL: u8 = 3;
+const INPUT_EVENT_KEY_DOWN: u8 = 4;
+const INPUT_EVENT_KEY_UP: u8 = 5;
 const INPUT_EVENT_RESIZE: u8 = 6;
 
 #[repr(C)]
@@ -56,6 +56,34 @@ const INPUT_EVENT_RESIZE: u8 = 6;
 struct ResizeData {
     width: u32,
     height: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct MouseMotionData {
+    x: f32,
+    y: f32,
+    dx: f32,
+    dy: f32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct MouseButtonData {
+    button: u32,
+    pressed: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct MouseWheelData {
+    dy: f32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct KeyData {
+    scancode: u32,
 }
 
 // ---------------------------------------------------------------------------
@@ -113,13 +141,34 @@ struct GpuState {
 
     // Per-frame draw state set by TypeScript
     draw_state: DrawState,
+
+    // JSON-encoded events for TypeScript to consume
+    input_events: Vec<String>,
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 struct DrawState {
     clear_color: [f32; 4],
     /// List of draw commands to execute each frame
     draw_commands: Vec<DrawCommand>,
+    /// Accumulated drag rotation from TypeScript
+    drag_angle: f32,
+    /// Rotation speed multiplier from TypeScript
+    rotation_speed: f32,
+    /// Scale factor from TypeScript
+    scale: f32,
+}
+
+impl Default for DrawState {
+    fn default() -> Self {
+        Self {
+            clear_color: [0.0; 4],
+            draw_commands: vec![],
+            drag_angle: 0.0,
+            rotation_speed: 1.0,
+            scale: 1.0,
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -574,11 +623,11 @@ fn op_gpu_create_render_pipeline(
             .create_render_pass(&render_pass_ci, None)
             .expect("Failed to create render pass");
 
-        // Pipeline layout with push constants: float angle, float aspect_ratio
+        // Pipeline layout with push constants: float angle, float aspect_ratio, float scale
         let push_constant_range = vk::PushConstantRange::default()
             .stage_flags(vk::ShaderStageFlags::VERTEX)
             .offset(0)
-            .size(8); // 2 floats
+            .size(12); // 3 floats
 
         let pipeline_layout_ci = vk::PipelineLayoutCreateInfo::default()
             .push_constant_ranges(std::slice::from_ref(&push_constant_range));
@@ -782,6 +831,24 @@ fn op_gpu_clear_draws(state: &mut OpState) {
     gpu.draw_state.draw_commands.clear();
 }
 
+#[op2]
+#[string]
+fn op_gpu_poll_events(state: &mut OpState) -> String {
+    let gpu = state.borrow_mut::<Arc<Mutex<GpuState>>>();
+    let mut gpu = gpu.lock().unwrap();
+    let events = std::mem::take(&mut gpu.input_events);
+    format!("[{}]", events.join(","))
+}
+
+#[op2(fast)]
+fn op_gpu_set_rotation(state: &mut OpState, drag_angle: f64, speed: f64, scale: f64) {
+    let gpu = state.borrow_mut::<Arc<Mutex<GpuState>>>();
+    let mut gpu = gpu.lock().unwrap();
+    gpu.draw_state.drag_angle = drag_angle as f32;
+    gpu.draw_state.rotation_speed = speed as f32;
+    gpu.draw_state.scale = scale as f32;
+}
+
 #[op2(fast)]
 fn op_log(#[string] msg: &str) {
     eprintln!("[scene.ts] {}", msg);
@@ -874,9 +941,10 @@ unsafe fn render_frame(
                     pipeline_res.pipeline,
                 );
 
-                // Push time-based rotation constants
+                // Push rotation constants: angle (elapsed * speed + drag), aspect, scale
                 let aspect = gpu.shared_img.width as f32 / gpu.shared_img.height as f32;
-                let push_data = [elapsed_secs, aspect];
+                let angle = elapsed_secs * draw_state.rotation_speed + draw_state.drag_angle;
+                let push_data = [angle, aspect, draw_state.scale];
                 device.cmd_push_constants(
                     cmd_buf,
                     pipeline_res.pipeline_layout,
@@ -1392,7 +1460,11 @@ fn main() {
         draw_state: DrawState {
             clear_color: [0.1, 0.1, 0.1, 1.0],
             draw_commands: vec![],
+            drag_angle: 0.0,
+            rotation_speed: 1.0,
+            scale: 1.0,
         },
+        input_events: Vec::new(),
     }));
 
     // -----------------------------------------------------------------------
@@ -1438,7 +1510,7 @@ fn main() {
     eprintln!("[deno_renderer] Surface shared, handle sent.");
 
     // -----------------------------------------------------------------------
-    // 8. Deno runtime — run TypeScript scene script
+    // 8. Deno runtime + render loop (JsRuntime stays alive through loop)
     // -----------------------------------------------------------------------
     {
         let gpu_clone = gpu_state.clone();
@@ -1453,6 +1525,8 @@ fn main() {
                 op_gpu_draw,
                 op_gpu_draw_with_vb,
                 op_gpu_clear_draws,
+                op_gpu_poll_events,
+                op_gpu_set_rotation,
                 op_log
             ]
         );
@@ -1470,6 +1544,7 @@ fn main() {
 
             runtime.op_state().borrow_mut().put(gpu_clone);
 
+            // Run initial script
             match std::fs::read_to_string(&script_path) {
                 Ok(code) => {
                     eprintln!("[deno_renderer] Running script: {}", script_path);
@@ -1488,132 +1563,206 @@ fn main() {
                     eprintln!("[deno_renderer] Using default clear color (dark gray)");
                 }
             }
-        });
-    }
 
-    // -----------------------------------------------------------------------
-    // 9. Allocate command buffer and fence for render loop
-    // -----------------------------------------------------------------------
-    let cmd_alloc_info = vk::CommandBufferAllocateInfo::default()
-        .command_pool(command_pool)
-        .level(vk::CommandBufferLevel::PRIMARY)
-        .command_buffer_count(1);
+            // ---------------------------------------------------------------
+            // 9. Allocate command buffer and fence for render loop
+            // ---------------------------------------------------------------
+            let cmd_alloc_info = vk::CommandBufferAllocateInfo::default()
+                .command_pool(command_pool)
+                .level(vk::CommandBufferLevel::PRIMARY)
+                .command_buffer_count(1);
 
-    let cmd_buf = unsafe {
-        device
-            .allocate_command_buffers(&cmd_alloc_info)
-            .expect("Failed to allocate command buffer")[0]
-    };
+            let cmd_buf = unsafe {
+                device
+                    .allocate_command_buffers(&cmd_alloc_info)
+                    .expect("Failed to allocate command buffer")[0]
+            };
 
-    let fence_ci = vk::FenceCreateInfo::default();
-    let fence = unsafe {
-        device
-            .create_fence(&fence_ci, None)
-            .expect("Failed to create fence")
-    };
+            let fence_ci = vk::FenceCreateInfo::default();
+            let fence = unsafe {
+                device
+                    .create_fence(&fence_ci, None)
+                    .expect("Failed to create fence")
+            };
 
-    // -----------------------------------------------------------------------
-    // 10. Render loop
-    // -----------------------------------------------------------------------
-    eprintln!("[deno_renderer] Entering render loop (Ctrl+C to exit)...");
+            // ---------------------------------------------------------------
+            // 10. Render loop — inside tokio block, JsRuntime alive
+            // ---------------------------------------------------------------
+            eprintln!("[deno_renderer] Entering render loop (Ctrl+C to exit)...");
 
-    let start_time = std::time::Instant::now();
+            let start_time = std::time::Instant::now();
 
-    while running.load(Ordering::Relaxed) {
-        // Poll for input events (non-blocking)
-        let mut event_buf = [0u8; std::mem::size_of::<InputEvent>()];
-        while let Some(n) = transport.recv_data_non_blocking(&mut event_buf) {
-            if n == std::mem::size_of::<InputEvent>() {
-                let event: InputEvent =
-                    unsafe { std::ptr::read(event_buf.as_ptr() as *const InputEvent) };
+            while running.load(Ordering::Relaxed) {
+                // Poll for input events (non-blocking)
+                let mut event_buf = [0u8; std::mem::size_of::<InputEvent>()];
+                while let Some(n) = transport.recv_data_non_blocking(&mut event_buf) {
+                    if n == std::mem::size_of::<InputEvent>() {
+                        let event: InputEvent =
+                            unsafe { std::ptr::read(event_buf.as_ptr() as *const InputEvent) };
 
-                if event.event_type == INPUT_EVENT_RESIZE {
-                    let resize: ResizeData =
-                        unsafe { std::ptr::read(event.data.as_ptr() as *const ResizeData) };
-                    let new_w = resize.width;
-                    let new_h = resize.height;
-
-                    let mut gpu = gpu_state.lock().unwrap();
-                    if new_w > 0
-                        && new_h > 0
-                        && (new_w != gpu.shared_img.width || new_h != gpu.shared_img.height)
-                    {
-                        unsafe {
-                            device.device_wait_idle().expect("device_wait_idle failed");
-
-                            // Destroy old framebuffer + image view
-                            if gpu.framebuffer != vk::Framebuffer::null() {
-                                device.destroy_framebuffer(gpu.framebuffer, None);
-                                gpu.framebuffer = vk::Framebuffer::null();
-                            }
-                            if gpu.image_view != vk::ImageView::null() {
-                                device.destroy_image_view(gpu.image_view, None);
-                                gpu.image_view = vk::ImageView::null();
-                            }
-
-                            destroy_shared_image(&device, &mut gpu.shared_img);
-                            gpu.shared_img = create_shared_image(
-                                &instance,
-                                &device,
-                                phys_device,
-                                new_w,
-                                new_h,
-                                image_format,
-                            );
-
-                            // Recreate image view + framebuffer if we have a pipeline
-                            let first_render_pass = gpu
-                                .render_pipelines
-                                .values()
-                                .next()
-                                .map(|p| p.render_pass);
-                            if let Some(render_pass) = first_render_pass {
-                                gpu.image_view = create_image_view(
-                                    &device,
-                                    gpu.shared_img.image,
-                                    image_format,
-                                );
-                                gpu.framebuffer = create_framebuffer(
-                                    &device,
-                                    render_pass,
-                                    gpu.image_view,
-                                    new_w,
-                                    new_h,
-                                );
+                        // Queue JSON event for TypeScript consumption
+                        {
+                            let mut gpu = gpu_state.lock().unwrap();
+                            match event.event_type {
+                                INPUT_EVENT_MOUSE_MOTION => {
+                                    let d: MouseMotionData = unsafe {
+                                        std::ptr::read(event.data.as_ptr() as *const MouseMotionData)
+                                    };
+                                    gpu.input_events.push(format!(
+                                        r#"{{"type":"mouse_motion","x":{},"y":{},"dx":{},"dy":{}}}"#,
+                                        d.x, d.y, d.dx, d.dy
+                                    ));
+                                }
+                                INPUT_EVENT_MOUSE_BUTTON => {
+                                    let d: MouseButtonData = unsafe {
+                                        std::ptr::read(event.data.as_ptr() as *const MouseButtonData)
+                                    };
+                                    gpu.input_events.push(format!(
+                                        r#"{{"type":"mouse_button","button":{},"pressed":{}}}"#,
+                                        d.button, d.pressed
+                                    ));
+                                }
+                                INPUT_EVENT_MOUSE_WHEEL => {
+                                    let d: MouseWheelData = unsafe {
+                                        std::ptr::read(event.data.as_ptr() as *const MouseWheelData)
+                                    };
+                                    gpu.input_events.push(format!(
+                                        r#"{{"type":"mouse_wheel","dy":{}}}"#,
+                                        d.dy
+                                    ));
+                                }
+                                INPUT_EVENT_KEY_DOWN => {
+                                    let d: KeyData = unsafe {
+                                        std::ptr::read(event.data.as_ptr() as *const KeyData)
+                                    };
+                                    gpu.input_events.push(format!(
+                                        r#"{{"type":"key_down","scancode":{}}}"#,
+                                        d.scancode
+                                    ));
+                                }
+                                INPUT_EVENT_KEY_UP => {
+                                    let d: KeyData = unsafe {
+                                        std::ptr::read(event.data.as_ptr() as *const KeyData)
+                                    };
+                                    gpu.input_events.push(format!(
+                                        r#"{{"type":"key_up","scancode":{}}}"#,
+                                        d.scancode
+                                    ));
+                                }
+                                INPUT_EVENT_RESIZE => {
+                                    let resize: ResizeData = unsafe {
+                                        std::ptr::read(event.data.as_ptr() as *const ResizeData)
+                                    };
+                                    gpu.input_events.push(format!(
+                                        r#"{{"type":"resize","width":{},"height":{}}}"#,
+                                        resize.width, resize.height
+                                    ));
+                                }
+                                INPUT_EVENT_NONE | _ => {}
                             }
                         }
 
-                        let si = SharedSurfaceInfo {
-                            width: gpu.shared_img.width,
-                            height: gpu.shared_img.height,
-                            format: image_format.as_raw() as u32,
-                            memory_size: gpu.shared_img.memory_size,
-                            memory_type_bits: gpu.shared_img.memory_type_bits,
-                        };
-                        let si_bytes = unsafe {
-                            std::slice::from_raw_parts(
-                                &si as *const SharedSurfaceInfo as *const u8,
-                                std::mem::size_of::<SharedSurfaceInfo>(),
-                            )
-                        };
-                        let _ = transport.send_handle(gpu.shared_img.handle, si_bytes);
-                        eprintln!("[deno_renderer] Resized to {}x{}", new_w, new_h);
+                        // Handle resize (recreate shared image)
+                        if event.event_type == INPUT_EVENT_RESIZE {
+                            let resize: ResizeData =
+                                unsafe { std::ptr::read(event.data.as_ptr() as *const ResizeData) };
+                            let new_w = resize.width;
+                            let new_h = resize.height;
+
+                            let mut gpu = gpu_state.lock().unwrap();
+                            if new_w > 0
+                                && new_h > 0
+                                && (new_w != gpu.shared_img.width || new_h != gpu.shared_img.height)
+                            {
+                                unsafe {
+                                    device.device_wait_idle().expect("device_wait_idle failed");
+
+                                    // Destroy old framebuffer + image view
+                                    if gpu.framebuffer != vk::Framebuffer::null() {
+                                        device.destroy_framebuffer(gpu.framebuffer, None);
+                                        gpu.framebuffer = vk::Framebuffer::null();
+                                    }
+                                    if gpu.image_view != vk::ImageView::null() {
+                                        device.destroy_image_view(gpu.image_view, None);
+                                        gpu.image_view = vk::ImageView::null();
+                                    }
+
+                                    destroy_shared_image(&device, &mut gpu.shared_img);
+                                    gpu.shared_img = create_shared_image(
+                                        &instance,
+                                        &device,
+                                        phys_device,
+                                        new_w,
+                                        new_h,
+                                        image_format,
+                                    );
+
+                                    // Recreate image view + framebuffer if we have a pipeline
+                                    let first_render_pass = gpu
+                                        .render_pipelines
+                                        .values()
+                                        .next()
+                                        .map(|p| p.render_pass);
+                                    if let Some(render_pass) = first_render_pass {
+                                        gpu.image_view = create_image_view(
+                                            &device,
+                                            gpu.shared_img.image,
+                                            image_format,
+                                        );
+                                        gpu.framebuffer = create_framebuffer(
+                                            &device,
+                                            render_pass,
+                                            gpu.image_view,
+                                            new_w,
+                                            new_h,
+                                        );
+                                    }
+                                }
+
+                                let si = SharedSurfaceInfo {
+                                    width: gpu.shared_img.width,
+                                    height: gpu.shared_img.height,
+                                    format: image_format.as_raw() as u32,
+                                    memory_size: gpu.shared_img.memory_size,
+                                    memory_type_bits: gpu.shared_img.memory_type_bits,
+                                };
+                                let si_bytes = unsafe {
+                                    std::slice::from_raw_parts(
+                                        &si as *const SharedSurfaceInfo as *const u8,
+                                        std::mem::size_of::<SharedSurfaceInfo>(),
+                                    )
+                                };
+                                let _ = transport.send_handle(gpu.shared_img.handle, si_bytes);
+                                eprintln!("[deno_renderer] Resized to {}x{}", new_w, new_h);
+                            }
+                        }
                     }
                 }
-            }
-        }
 
-        // Render frame
-        {
-            let gpu = gpu_state.lock().unwrap();
-            unsafe {
+                // Call JS frame callback
                 let elapsed = start_time.elapsed().as_secs_f32();
-                render_frame(&gpu, cmd_buf, fence, elapsed);
-            }
-        }
+                let frame_code = format!("if(globalThis.__frame)globalThis.__frame({})", elapsed);
+                let _ = runtime.execute_script("<frame>", frame_code);
 
-        // Target ~60fps
-        std::thread::sleep(Duration::from_millis(16));
+                // Render frame
+                {
+                    let gpu = gpu_state.lock().unwrap();
+                    unsafe {
+                        render_frame(&gpu, cmd_buf, fence, elapsed);
+                    }
+                }
+
+                // Target ~60fps
+                std::thread::sleep(Duration::from_millis(16));
+            }
+
+            // Cleanup cmd_buf and fence inside the block where they were created
+            unsafe {
+                device.device_wait_idle().expect("device_wait_idle failed");
+                device.destroy_fence(fence, None);
+                device.free_command_buffers(command_pool, &[cmd_buf]);
+            }
+        });
     }
 
     eprintln!("\n[deno_renderer] Shutting down...");
@@ -1658,8 +1807,7 @@ fn main() {
                 device.destroy_image_view(gpu.image_view, None);
             }
 
-            device.destroy_fence(fence, None);
-            device.free_command_buffers(command_pool, &[cmd_buf]);
+            // fence and cmd_buf already cleaned up in tokio block
             destroy_shared_image(&device, &mut gpu.shared_img);
             device.destroy_command_pool(command_pool, None);
             device.destroy_device(None);
