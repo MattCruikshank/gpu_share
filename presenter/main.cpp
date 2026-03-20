@@ -92,6 +92,10 @@ int main(int argc, char* argv[]) {
                 event.key.key == SDLK_ESCAPE) {
                 running = false;
             }
+            if (event.type == SDL_EVENT_WINDOW_RESIZED ||
+                event.type == SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED) {
+                vkCtx.notifyResized();
+            }
 
             // Forward input to renderer
             InputEvent ie{};
@@ -133,7 +137,8 @@ int main(int argc, char* argv[]) {
             }
         }
 
-        uint32_t imageIndex = vkCtx.acquireNextImage();
+        uint32_t imageIndex = 0;
+        if (!vkCtx.acquireNextImage(imageIndex)) continue;
         VkCommandBuffer cmd = vkCtx.getCommandBuffer(imageIndex);
 
         vkResetCommandBuffer(cmd, 0);

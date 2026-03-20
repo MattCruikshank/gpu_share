@@ -17,12 +17,17 @@
         }                                                                       \
     } while (0)
 
+constexpr uint32_t MAX_FRAMES_IN_FLIGHT = 2;
+
 class VulkanContext {
 public:
     bool init(SDL_Window* window);
-    uint32_t acquireNextImage();
+    // Returns false if swapchain was recreated (caller should skip this frame).
+    bool acquireNextImage(uint32_t& imageIndex);
     void submitAndPresent(uint32_t imageIndex, VkCommandBuffer cmdBuf);
     void destroy();
+
+    void notifyResized() { framebufferResized_ = true; }
 
     VkDevice getDevice() const { return device_; }
     VkPhysicalDevice getPhysicalDevice() const { return physicalDevice_; }
@@ -47,6 +52,8 @@ private:
     bool pickPhysicalDevice();
     bool createDevice();
     bool createSwapchain();
+    void cleanupSwapchain();
+    void recreateSwapchain();
     bool createCommandPool();
     bool createSyncObjects();
     void loadFunctionPointers();
@@ -68,12 +75,14 @@ private:
     VkCommandPool commandPool_ = VK_NULL_HANDLE;
     std::vector<VkCommandBuffer> commandBuffers_;
 
-    // One set of sync objects per swapchain image, indexed by imageIndex
-    std::vector<VkSemaphore> imageAvailableSemaphores_;
-    std::vector<VkSemaphore> renderFinishedSemaphores_;
-    std::vector<VkFence> inFlightFences_;
-    uint32_t acquireIndex_ = 0;
-    VkSemaphore lastAcquireSemaphore_ = VK_NULL_HANDLE;
+    // Sync: per frame-in-flight (not per swapchain image)
+    VkSemaphore imageAvailableSemaphores_[MAX_FRAMES_IN_FLIGHT] = {};
+    VkSemaphore renderFinishedSemaphores_[MAX_FRAMES_IN_FLIGHT] = {};
+    VkFence inFlightFences_[MAX_FRAMES_IN_FLIGHT] = {};
+    // Track which frame-in-flight fence is guarding each swapchain image
+    std::vector<VkFence> imagesInFlight_;
+    uint32_t currentFrame_ = 0;
+    bool framebufferResized_ = false;
 
     VkDebugUtilsMessengerEXT debugMessenger_ = VK_NULL_HANDLE;
 };
