@@ -207,32 +207,31 @@ public:
         }
 
 #ifdef _WIN32
-        // Use WSAEventSelect + WaitForMultipleObjects for cancellable accept.
-        WSAEVENT sockEvent = WSACreateEvent();
-        if (sockEvent == WSA_INVALID_EVENT) {
-            fprintf(stderr, "TcpHandleTransport::accept: WSACreateEvent failed\n");
-            return false;
-        }
-        WSAEventSelect(listenSock_, sockEvent, FD_ACCEPT);
+        // Poll for incoming connections with cancel support.
+        // A connection may already be queued in the backlog if the client
+        // connected before we got here, so check non-blocking first.
+        {
+            u_long nonBlock = 1;
+            ioctlsocket(listenSock_, FIONBIO, &nonBlock);
 
-        HANDLE events[2] = { sockEvent, cancelEvent_ };
-        DWORD waited = WaitForMultipleObjects(2, events, FALSE, INFINITE);
-        WSAEventSelect(listenSock_, sockEvent, 0);  // reset
-        WSACloseEvent(sockEvent);
+            while (true) {
+                connSock_ = ::accept(listenSock_, nullptr, nullptr);
+                if (connSock_ != kInvalidSocket) break;
 
-        if (waited != WAIT_OBJECT_0) {
-            fprintf(stderr, "TcpHandleTransport::accept: cancelled\n");
-            return false;
-        }
+                // Check if cancelled
+                if (cancelEvent_ &&
+                    WaitForSingleObject(cancelEvent_, 0) == WAIT_OBJECT_0) {
+                    fprintf(stderr, "TcpHandleTransport::accept: cancelled\n");
+                    u_long blocking = 0;
+                    ioctlsocket(listenSock_, FIONBIO, &blocking);
+                    return false;
+                }
 
-        // Put socket back to blocking mode after WSAEventSelect.
-        u_long blocking = 0;
-        ioctlsocket(listenSock_, FIONBIO, &blocking);
+                Sleep(10);
+            }
 
-        connSock_ = ::accept(listenSock_, nullptr, nullptr);
-        if (connSock_ == kInvalidSocket) {
-            fprintf(stderr, "TcpHandleTransport::accept: accept() failed\n");
-            return false;
+            u_long blocking = 0;
+            ioctlsocket(listenSock_, FIONBIO, &blocking);
         }
 #else
         // Use poll() on both listenSock_ and cancelPipe_[0].
