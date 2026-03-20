@@ -8,6 +8,111 @@
 #include <SDL3/SDL.h>
 #include <cstdio>
 #include <cstring>
+#include <string>
+
+#ifdef _WIN32
+    #include <windows.h>
+#else
+    #include <unistd.h>
+    #include <sys/wait.h>
+    #include <signal.h>
+#endif
+
+// ---------------------------------------------------------------------------
+// Child process management
+// ---------------------------------------------------------------------------
+struct ChildProcess {
+#ifdef _WIN32
+    PROCESS_INFORMATION pi{};
+    bool valid = false;
+
+    bool spawn(const std::string& exe, const std::string& args) {
+        std::string cmdLine = "\"" + exe + "\" " + args;
+        STARTUPINFOA si{};
+        si.cb = sizeof(si);
+        if (!CreateProcessA(nullptr, const_cast<char*>(cmdLine.c_str()),
+                            nullptr, nullptr, FALSE, 0, nullptr, nullptr,
+                            &si, &pi)) {
+            fprintf(stderr, "CreateProcess failed: %lu\n", GetLastError());
+            return false;
+        }
+        valid = true;
+        return true;
+    }
+
+    void terminate() {
+        if (!valid) return;
+        TerminateProcess(pi.hProcess, 0);
+        WaitForSingleObject(pi.hProcess, 3000);
+        CloseHandle(pi.hProcess);
+        CloseHandle(pi.hThread);
+        valid = false;
+    }
+#else
+    pid_t pid = -1;
+
+    bool spawn(const std::string& exe, const std::string& args) {
+        pid = fork();
+        if (pid < 0) {
+            perror("fork");
+            return false;
+        }
+        if (pid == 0) {
+            // Child — parse args and exec
+            // Simple: just pass --socket <path> via execlp
+            // args is expected to be "--socket <path>"
+            std::string socketArg;
+            auto pos = args.find("--socket ");
+            if (pos != std::string::npos) {
+                socketArg = args.substr(pos + 9);
+                // trim whitespace
+                while (!socketArg.empty() && socketArg.back() == ' ')
+                    socketArg.pop_back();
+            }
+            if (!socketArg.empty()) {
+                execlp(exe.c_str(), exe.c_str(), "--socket", socketArg.c_str(), nullptr);
+            } else {
+                execlp(exe.c_str(), exe.c_str(), nullptr);
+            }
+            perror("execlp");
+            _exit(1);
+        }
+        return true;
+    }
+
+    void terminate() {
+        if (pid <= 0) return;
+        kill(pid, SIGTERM);
+        int status = 0;
+        waitpid(pid, &status, 0);
+        pid = -1;
+    }
+#endif
+};
+
+// ---------------------------------------------------------------------------
+// Find the renderer executable next to the presenter
+// ---------------------------------------------------------------------------
+static std::string findRendererExe(const char* presenterArgv0) {
+    std::string path(presenterArgv0);
+#ifdef _WIN32
+    char sep = '\\';
+    // Also handle forward slashes
+    auto lastSep = path.find_last_of("\\/");
+#else
+    char sep = '/';
+    auto lastSep = path.find_last_of('/');
+#endif
+    std::string dir;
+    if (lastSep != std::string::npos) {
+        dir = path.substr(0, lastSep + 1);
+    }
+#ifdef _WIN32
+    return dir + "test_renderer.exe";
+#else
+    return dir + "test_renderer";
+#endif
+}
 
 static void forwardEvent(HandleTransport* t, const InputEvent& ev) {
     t->sendData(&ev, sizeof(ev));
@@ -19,10 +124,25 @@ int main(int argc, char* argv[]) {
 #else
     const char* socketPath = "/tmp/gpu-share.sock";
 #endif
+    const char* rendererPath = nullptr;
+    bool noSpawn = false;
+
     for (int i = 1; i < argc; i++) {
         if ((strcmp(argv[i], "--socket") == 0 || strcmp(argv[i], "-s") == 0) && i + 1 < argc) {
             socketPath = argv[++i];
+        } else if (strcmp(argv[i], "--renderer") == 0 && i + 1 < argc) {
+            rendererPath = argv[++i];
+        } else if (strcmp(argv[i], "--no-spawn") == 0) {
+            noSpawn = true;
         }
+    }
+
+    // Determine renderer exe path
+    std::string rendererExe;
+    if (rendererPath) {
+        rendererExe = rendererPath;
+    } else {
+        rendererExe = findRendererExe(argv[0]);
     }
 
     if (!SDL_Init(SDL_INIT_VIDEO)) {
@@ -46,11 +166,39 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
+    // Launch renderer process (unless --no-spawn)
+    ChildProcess renderer;
+    if (!noSpawn) {
+        std::string rendererArgs = std::string("--socket ") + socketPath;
+        fprintf(stderr, "Launching renderer: %s %s\n",
+                rendererExe.c_str(), rendererArgs.c_str());
+        if (!renderer.spawn(rendererExe, rendererArgs)) {
+            fprintf(stderr, "Failed to launch renderer\n");
+            vkCtx.destroy();
+            SDL_DestroyWindow(window);
+            SDL_Quit();
+            return 1;
+        }
+        // Give renderer a moment to start listening
+        SDL_Delay(500);
+    }
+
     // Connect to renderer via transport
     auto transport = HandleTransport::create();
     fprintf(stderr, "Connecting to renderer at %s...\n", socketPath);
-    if (!transport->connect(socketPath)) {
-        fprintf(stderr, "Failed to connect to renderer socket\n");
+
+    // Retry connection a few times (renderer may still be starting)
+    bool connected = false;
+    for (int attempt = 0; attempt < 10; attempt++) {
+        if (transport->connect(socketPath)) {
+            connected = true;
+            break;
+        }
+        SDL_Delay(300);
+    }
+    if (!connected) {
+        fprintf(stderr, "Failed to connect to renderer\n");
+        renderer.terminate();
         vkCtx.destroy();
         SDL_DestroyWindow(window);
         SDL_Quit();
@@ -64,6 +212,7 @@ int main(int argc, char* argv[]) {
     if (!transport->recvHandle(memoryHandle, &surfaceInfo, sizeof(surfaceInfo))) {
         fprintf(stderr, "Failed to receive surface info from renderer\n");
         transport->close();
+        renderer.terminate();
         vkCtx.destroy();
         SDL_DestroyWindow(window);
         SDL_Quit();
@@ -190,6 +339,7 @@ int main(int argc, char* argv[]) {
     imported.destroy(vkCtx.getDevice());
     vkCtx.destroy();
     transport->close();
+    renderer.terminate();
     SDL_DestroyWindow(window);
     SDL_Quit();
 
