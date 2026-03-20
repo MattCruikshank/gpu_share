@@ -1095,7 +1095,6 @@ unsafe fn submit_and_wait(
 mod transport {
     use std::io::{Read, Write};
     use std::net::{TcpListener, TcpStream};
-    use std::time::Duration;
 
     pub struct TcpTransport {
         listener: Option<TcpListener>,
@@ -1221,7 +1220,6 @@ mod transport {
         }
 
         pub fn recv_data_non_blocking(&self, buf: &mut [u8]) -> Option<usize> {
-            use std::io::ErrorKind;
             let stream = self.stream.as_ref()?;
             // Peek first to check if a full message is available (non-destructive)
             let mut peek_buf = vec![0u8; buf.len()];

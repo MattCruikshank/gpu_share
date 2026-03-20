@@ -36,6 +36,7 @@ public:
     VkExtent2D getSwapchainExtent() const { return swapchainExtent_; }
     VkImage getSwapchainImage(uint32_t index) const { return swapchainImages_[index]; }
     VkCommandBuffer getCommandBuffer(uint32_t index) const { return commandBuffers_[index]; }
+    VkCommandBuffer getCurrentCommandBuffer() const { return commandBuffers_[currentFrame_]; }
     uint32_t swapchainImageCount() const { return static_cast<uint32_t>(swapchainImages_.size()); }
 
     // Imported function pointers

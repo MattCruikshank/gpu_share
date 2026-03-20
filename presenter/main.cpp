@@ -354,7 +354,7 @@ int main(int argc, char* argv[]) {
 
         uint32_t imageIndex = 0;
         if (!vkCtx.acquireNextImage(imageIndex)) continue;
-        VkCommandBuffer cmd = vkCtx.getCommandBuffer(imageIndex);
+        VkCommandBuffer cmd = vkCtx.getCurrentCommandBuffer();
 
         vkResetCommandBuffer(cmd, 0);
 
