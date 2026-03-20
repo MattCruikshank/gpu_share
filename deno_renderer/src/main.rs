@@ -9,6 +9,15 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+#[cfg(unix)]
+type NativeHandle = i32;    // fd
+#[cfg(windows)]
+type NativeHandle = isize;  // HANDLE as isize for easy storage
+#[cfg(unix)]
+const INVALID_HANDLE: NativeHandle = -1;
+#[cfg(windows)]
+const INVALID_HANDLE: NativeHandle = 0;  // NULL HANDLE
+
 // ---------------------------------------------------------------------------
 // SharedSurfaceInfo — must match the C++ layout exactly (C ABI)
 // ---------------------------------------------------------------------------
@@ -102,6 +111,8 @@ mod transport {
         stream: Option<TcpStream>,
         #[allow(dead_code)]
         remote_pid: u32,
+        #[cfg(windows)]
+        remote_process: isize,  // HANDLE from OpenProcess
     }
 
     fn write_all(stream: &mut TcpStream, data: &[u8]) -> Result<(), String> {
@@ -118,6 +129,8 @@ mod transport {
                 listener: None,
                 stream: None,
                 remote_pid: 0,
+                #[cfg(windows)]
+                remote_process: 0,
             }
         }
 
@@ -155,19 +168,56 @@ mod transport {
                 write_all(stream, &my_pid.to_le_bytes())?;
             }
             eprintln!("[transport] PID exchange: local={}, remote={}", my_pid, self.remote_pid);
+
+            #[cfg(windows)]
+            {
+                use windows_sys::Win32::System::Threading::OpenProcess;
+                use windows_sys::Win32::System::Threading::PROCESS_DUP_HANDLE;
+                self.remote_process = unsafe { OpenProcess(PROCESS_DUP_HANDLE, 0, self.remote_pid) };
+                if self.remote_process == 0 {
+                    return Err(format!("OpenProcess({}) failed", self.remote_pid));
+                }
+            }
+
             Ok(())
         }
 
-        /// Send a handle (fd on Linux) + data payload over TCP.
-        /// The receiver uses pidfd_getfd to clone the fd.
+        /// Send a handle (fd on Linux, HANDLE on Windows) + data payload over TCP.
+        /// On Linux the receiver uses pidfd_getfd to clone the fd.
+        /// On Windows the renderer DuplicateHandle's into the remote process first.
         pub fn send_handle(
             &mut self,
-            handle: i32,
+            handle: super::NativeHandle,
             data: &[u8],
         ) -> Result<(), String> {
             let stream = self.stream.as_mut()
                 .ok_or("not connected")?;
+
+            #[cfg(unix)]
             let handle_val = handle as u64;
+
+            #[cfg(windows)]
+            let handle_val = {
+                use windows_sys::Win32::Foundation::{DuplicateHandle, DUPLICATE_SAME_ACCESS};
+                use windows_sys::Win32::System::Threading::GetCurrentProcess;
+                let mut remote_handle: isize = 0;
+                let ok = unsafe {
+                    DuplicateHandle(
+                        GetCurrentProcess(),
+                        handle,
+                        self.remote_process,
+                        &mut remote_handle,
+                        0,
+                        0, // FALSE
+                        DUPLICATE_SAME_ACCESS,
+                    )
+                };
+                if ok == 0 {
+                    return Err("DuplicateHandle failed".to_string());
+                }
+                remote_handle as u64
+            };
+
             write_all(stream, &handle_val.to_le_bytes())?;
             if !data.is_empty() {
                 write_all(stream, data)?;
@@ -194,6 +244,11 @@ mod transport {
         pub fn close(&mut self) {
             self.stream = None;
             self.listener = None;
+            #[cfg(windows)]
+            if self.remote_process != 0 {
+                unsafe { windows_sys::Win32::Foundation::CloseHandle(self.remote_process); }
+                self.remote_process = 0;
+            }
         }
     }
 
@@ -232,7 +287,7 @@ unsafe fn find_memory_type(
 struct SharedImage {
     image: vk::Image,
     memory: vk::DeviceMemory,
-    fd: i32,
+    handle: NativeHandle,
     width: u32,
     height: u32,
     memory_size: u64,
@@ -246,11 +301,15 @@ unsafe fn create_shared_image(
     width: u32,
     height: u32,
     format: vk::Format,
-    get_memory_fd: &ash::khr::external_memory_fd::Device,
 ) -> SharedImage {
+    #[cfg(unix)]
+    let handle_type = vk::ExternalMemoryHandleTypeFlags::OPAQUE_FD;
+    #[cfg(windows)]
+    let handle_type = vk::ExternalMemoryHandleTypeFlags::OPAQUE_WIN32;
+
     // Create image with external memory support
     let mut ext_mem_image_ci = vk::ExternalMemoryImageCreateInfo::default()
-        .handle_types(vk::ExternalMemoryHandleTypeFlags::OPAQUE_FD);
+        .handle_types(handle_type);
 
     let image_ci = vk::ImageCreateInfo::default()
         .push_next(&mut ext_mem_image_ci)
@@ -280,7 +339,7 @@ unsafe fn create_shared_image(
 
     // Allocate exportable memory
     let mut export_alloc_info = vk::ExportMemoryAllocateInfo::default()
-        .handle_types(vk::ExternalMemoryHandleTypeFlags::OPAQUE_FD);
+        .handle_types(handle_type);
 
     let mem_type_index = find_memory_type(
         instance,
@@ -302,24 +361,34 @@ unsafe fn create_shared_image(
         .bind_image_memory(image, memory, 0)
         .expect("Failed to bind image memory");
 
-    // Export fd
-    let get_fd_info = vk::MemoryGetFdInfoKHR::default()
-        .memory(memory)
-        .handle_type(vk::ExternalMemoryHandleTypeFlags::OPAQUE_FD);
+    // Export handle
+    #[cfg(unix)]
+    let handle = {
+        let ext = ash::khr::external_memory_fd::Device::new(instance, device);
+        let get_fd_info = vk::MemoryGetFdInfoKHR::default()
+            .memory(memory)
+            .handle_type(vk::ExternalMemoryHandleTypeFlags::OPAQUE_FD);
+        ext.get_memory_fd(&get_fd_info).expect("Failed to export memory fd") as NativeHandle
+    };
 
-    let fd = get_memory_fd
-        .get_memory_fd(&get_fd_info)
-        .expect("Failed to export memory fd");
+    #[cfg(windows)]
+    let handle = {
+        let ext = ash::khr::external_memory_win32::Device::new(instance, device);
+        let get_handle_info = vk::MemoryGetWin32HandleInfoKHR::default()
+            .memory(memory)
+            .handle_type(vk::ExternalMemoryHandleTypeFlags::OPAQUE_WIN32);
+        ext.get_memory_win32_handle(&get_handle_info).expect("Failed to export memory handle") as NativeHandle
+    };
 
     eprintln!(
-        "[deno_renderer] Exported memory fd={} for {}x{} image (size={})",
-        fd, width, height, mem_reqs.size
+        "[deno_renderer] Exported memory handle={} for {}x{} image (size={})",
+        handle, width, height, mem_reqs.size
     );
 
     SharedImage {
         image,
         memory,
-        fd,
+        handle,
         width,
         height,
         memory_size: mem_reqs.size,
@@ -336,9 +405,15 @@ unsafe fn destroy_shared_image(device: &ash::Device, img: &mut SharedImage) {
         device.free_memory(img.memory, None);
         img.memory = vk::DeviceMemory::null();
     }
-    if img.fd >= 0 {
-        libc::close(img.fd);
-        img.fd = -1;
+    #[cfg(unix)]
+    if img.handle != INVALID_HANDLE {
+        libc::close(img.handle as i32);
+        img.handle = INVALID_HANDLE;
+    }
+    #[cfg(windows)]
+    if img.handle != INVALID_HANDLE {
+        unsafe { windows_sys::Win32::Foundation::CloseHandle(img.handle); }
+        img.handle = INVALID_HANDLE;
     }
 }
 
@@ -466,9 +541,18 @@ fn main() {
         .queue_family_index(graphics_queue_family)
         .queue_priorities(&queue_priority);
 
+    #[cfg(unix)]
     let device_extensions = [
         ash::khr::external_memory::NAME.as_ptr(),
         ash::khr::external_memory_fd::NAME.as_ptr(),
+        ash::khr::dedicated_allocation::NAME.as_ptr(),
+        ash::khr::get_memory_requirements2::NAME.as_ptr(),
+    ];
+
+    #[cfg(windows)]
+    let device_extensions = [
+        ash::khr::external_memory::NAME.as_ptr(),
+        ash::khr::external_memory_win32::NAME.as_ptr(),
         ash::khr::dedicated_allocation::NAME.as_ptr(),
         ash::khr::get_memory_requirements2::NAME.as_ptr(),
     ];
@@ -502,8 +586,6 @@ fn main() {
     // -----------------------------------------------------------------------
     // 5. Load memory export function & create shared image
     // -----------------------------------------------------------------------
-    let get_memory_fd_ext = ash::khr::external_memory_fd::Device::new(&instance, &device);
-
     let image_format = vk::Format::R8G8B8A8_UNORM;
     let initial_width: u32 = 640;
     let initial_height: u32 = 480;
@@ -516,7 +598,6 @@ fn main() {
             initial_width,
             initial_height,
             image_format,
-            &get_memory_fd_ext,
         )
     };
     eprintln!("[deno_renderer] Shared image created");
@@ -556,7 +637,7 @@ fn main() {
     };
 
     transport
-        .send_handle(shared_img.fd, info_bytes)
+        .send_handle(shared_img.handle, info_bytes)
         .unwrap_or_else(|e| panic!("Failed to send handle: {}", e));
     eprintln!("[deno_renderer] Surface shared, handle sent.");
 
@@ -663,7 +744,6 @@ fn main() {
                                 new_w,
                                 new_h,
                                 image_format,
-                                &get_memory_fd_ext,
                             );
                         }
 
@@ -681,7 +761,7 @@ fn main() {
                                 std::mem::size_of::<SharedSurfaceInfo>(),
                             )
                         };
-                        let _ = transport.send_handle(shared_img.fd, si_bytes);
+                        let _ = transport.send_handle(shared_img.handle, si_bytes);
                         eprintln!("[deno_renderer] Resized to {}x{}", new_w, new_h);
                     }
                 }
@@ -831,6 +911,7 @@ fn main() {
 // ---------------------------------------------------------------------------
 // Simple ctrlc handler using signal
 // ---------------------------------------------------------------------------
+#[cfg(unix)]
 fn ctrlc_simple(running: Arc<AtomicBool>) {
     unsafe {
         // Store in a static so the signal handler can access it
@@ -851,5 +932,23 @@ fn ctrlc_simple(running: Arc<AtomicBool>) {
         sa.sa_flags = 0;
         libc::sigaction(libc::SIGINT, &sa, std::ptr::null_mut());
         libc::sigaction(libc::SIGTERM, &sa, std::ptr::null_mut());
+    }
+}
+
+#[cfg(windows)]
+fn ctrlc_simple(running: Arc<AtomicBool>) {
+    unsafe {
+        use windows_sys::Win32::System::Console::SetConsoleCtrlHandler;
+        static mut RUNNING: Option<*const AtomicBool> = None;
+        RUNNING = Some(Arc::into_raw(running));
+
+        unsafe extern "system" fn handler(_: u32) -> i32 {
+            if let Some(ptr) = RUNNING {
+                (*ptr).store(false, Ordering::Relaxed);
+            }
+            1 // TRUE, handled
+        }
+
+        SetConsoleCtrlHandler(Some(handler), 1); // TRUE
     }
 }
