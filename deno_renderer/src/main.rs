@@ -435,7 +435,11 @@ fn op_gpu_create_render_pipeline(
     let (naga_module, module_info) = wgsl_source;
 
     // Compile vertex SPIR-V
-    let options = naga::back::spv::Options::default();
+    let options = naga::back::spv::Options {
+        lang_version: (1, 0),
+        flags: naga::back::spv::WriterFlags::empty(),
+        ..Default::default()
+    };
     let vert_spirv = {
         let pipeline_options = naga::back::spv::PipelineOptions {
             shader_stage: naga::ShaderStage::Vertex,
@@ -589,11 +593,18 @@ fn op_gpu_create_render_pipeline(
             .render_pass(render_pass)
             .subpass(0);
 
-        let pipeline = gpu
+        let pipeline = match gpu
             .device
             .create_graphics_pipelines(vk::PipelineCache::null(), &[pipeline_ci], None)
-            .map_err(|e| e.1)
-            .expect("Failed to create graphics pipeline")[0];
+        {
+            Ok(pipelines) => pipelines[0],
+            Err((_, err)) => {
+                eprintln!("[gpu] Failed to create graphics pipeline: {:?}", err);
+                gpu.device.destroy_pipeline_layout(pipeline_layout, None);
+                gpu.device.destroy_render_pass(render_pass, None);
+                return u32::MAX;
+            }
+        };
 
         // Cleanup shader modules (SPIR-V is baked into the pipeline now)
         gpu.device.destroy_shader_module(vert_module, None);

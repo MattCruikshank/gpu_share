@@ -14,20 +14,30 @@ op_log("Scene script loaded — setting up WebGPU pipeline");
 
 // Create shader module with WGSL
 const shader = op_gpu_create_shader_module(`
-  @vertex fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {
-    var pos = array<vec2f, 3>(
+  struct VsOutput {
+    @builtin(position) pos: vec4f,
+    @location(0) color: vec3f,
+  };
+
+  @vertex fn vs(@builtin(vertex_index) i: u32) -> VsOutput {
+    var positions = array<vec2f, 3>(
       vec2f( 0.0, -0.5),
       vec2f( 0.5,  0.5),
       vec2f(-0.5,  0.5)
     );
-    return vec4f(pos[i], 0.0, 1.0);
+    var colors = array<vec3f, 3>(
+      vec3f(1.0, 0.0, 0.0),
+      vec3f(0.0, 1.0, 0.0),
+      vec3f(0.0, 0.0, 1.0),
+    );
+    var out: VsOutput;
+    out.pos = vec4f(positions[i], 0.0, 1.0);
+    out.color = colors[i];
+    return out;
   }
 
-  @fragment fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
-    // Gradient based on position
-    let r = pos.x / 640.0;
-    let g = pos.y / 480.0;
-    return vec4f(r, g, 0.8, 1.0);
+  @fragment fn fs(@location(0) color: vec3f) -> @location(0) vec4f {
+    return vec4f(color, 1.0);
   }
 `);
 
@@ -50,6 +60,6 @@ if (shader === 0xFFFFFFFF) {
     // Draw a triangle every frame (3 vertices, 1 instance)
     op_gpu_draw(pipeline, 3, 1);
 
-    op_log("Scene ready: triangle with position-based gradient");
+    op_log("Scene ready: RGB triangle via WGSL!");
   }
 }
