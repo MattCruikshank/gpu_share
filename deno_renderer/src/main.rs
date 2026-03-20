@@ -574,8 +574,14 @@ fn op_gpu_create_render_pipeline(
             .create_render_pass(&render_pass_ci, None)
             .expect("Failed to create render pass");
 
-        // Pipeline layout (empty — no descriptor sets or push constants yet)
-        let pipeline_layout_ci = vk::PipelineLayoutCreateInfo::default();
+        // Pipeline layout with push constants: float angle, float aspect_ratio
+        let push_constant_range = vk::PushConstantRange::default()
+            .stage_flags(vk::ShaderStageFlags::VERTEX)
+            .offset(0)
+            .size(8); // 2 floats
+
+        let pipeline_layout_ci = vk::PipelineLayoutCreateInfo::default()
+            .push_constant_ranges(std::slice::from_ref(&push_constant_range));
         let pipeline_layout = gpu
             .device
             .create_pipeline_layout(&pipeline_layout_ci, None)
@@ -788,6 +794,7 @@ unsafe fn render_frame(
     gpu: &GpuState,
     cmd_buf: vk::CommandBuffer,
     fence: vk::Fence,
+    elapsed_secs: f32,
 ) {
     let device = &gpu.device;
     let draw_state = &gpu.draw_state;
@@ -865,6 +872,20 @@ unsafe fn render_frame(
                     cmd_buf,
                     vk::PipelineBindPoint::GRAPHICS,
                     pipeline_res.pipeline,
+                );
+
+                // Push time-based rotation constants
+                let aspect = gpu.shared_img.width as f32 / gpu.shared_img.height as f32;
+                let push_data = [elapsed_secs, aspect];
+                device.cmd_push_constants(
+                    cmd_buf,
+                    pipeline_res.pipeline_layout,
+                    vk::ShaderStageFlags::VERTEX,
+                    0,
+                    std::slice::from_raw_parts(
+                        push_data.as_ptr() as *const u8,
+                        std::mem::size_of_val(&push_data),
+                    ),
                 );
 
                 // Bind vertex buffers if any
@@ -1496,6 +1517,8 @@ fn main() {
     // -----------------------------------------------------------------------
     eprintln!("[deno_renderer] Entering render loop (Ctrl+C to exit)...");
 
+    let start_time = std::time::Instant::now();
+
     while running.load(Ordering::Relaxed) {
         // Poll for input events (non-blocking)
         let mut event_buf = [0u8; std::mem::size_of::<InputEvent>()];
@@ -1584,7 +1607,8 @@ fn main() {
         {
             let gpu = gpu_state.lock().unwrap();
             unsafe {
-                render_frame(&gpu, cmd_buf, fence);
+                let elapsed = start_time.elapsed().as_secs_f32();
+                render_frame(&gpu, cmd_buf, fence, elapsed);
             }
         }
 

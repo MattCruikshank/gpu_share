@@ -13,7 +13,14 @@ const {
 op_log("Scene script loaded — setting up WebGPU pipeline");
 
 // Create shader module with WGSL
+// Push constants: float angle (offset 0), float aspectRatio (offset 4)
 const shader = op_gpu_create_shader_module(`
+  struct PushConstants {
+    angle: f32,
+    aspect_ratio: f32,
+  };
+  var<push_constant> pc: PushConstants;
+
   struct VsOutput {
     @builtin(position) pos: vec4f,
     @location(0) color: vec3f,
@@ -30,8 +37,15 @@ const shader = op_gpu_create_shader_module(`
       vec3f(0.0, 1.0, 0.0),
       vec3f(0.0, 0.0, 1.0),
     );
+
+    let pos = positions[i];
+    let s = sin(pc.angle);
+    let c = cos(pc.angle);
+    var rotated = vec2f(pos.x * c - pos.y * s, pos.x * s + pos.y * c);
+    rotated.x = rotated.x / pc.aspect_ratio;
+
     var out: VsOutput;
-    out.pos = vec4f(positions[i], 0.0, 1.0);
+    out.pos = vec4f(rotated, 0.0, 1.0);
     out.color = colors[i];
     return out;
   }
@@ -46,7 +60,6 @@ if (shader === 0xFFFFFFFF) {
 } else {
   op_log(`Shader module created: id=${shader}`);
 
-  // Create render pipeline
   const pipeline = op_gpu_create_render_pipeline(shader, "vs", "fs");
 
   if (pipeline === 0xFFFFFFFF) {
@@ -54,12 +67,9 @@ if (shader === 0xFFFFFFFF) {
   } else {
     op_log(`Render pipeline created: id=${pipeline}`);
 
-    // Set clear color (dark blue-gray)
     op_gpu_set_clear_color(0.1, 0.1, 0.15, 1.0);
-
-    // Draw a triangle every frame (3 vertices, 1 instance)
     op_gpu_draw(pipeline, 3, 1);
 
-    op_log("Scene ready: RGB triangle via WGSL!");
+    op_log("Scene ready: spinning RGB triangle via WGSL + push constants!");
   }
 }
