@@ -226,6 +226,28 @@ public:
         return true;
     }
 
+    bool recvHandleNonBlocking(SharedMemoryHandle& outHandle,
+                                void* data, size_t dataLen) override {
+        outHandle = kInvalidMemoryHandle;
+        if (pipeHandle_ == INVALID_HANDLE_VALUE) return false;
+
+        // Check if enough data is available (handle value = 8 bytes + payload)
+        DWORD needed = static_cast<DWORD>(sizeof(uint64_t) + dataLen);
+        DWORD available = 0;
+        if (!PeekNamedPipe(pipeHandle_, nullptr, 0, nullptr, &available, nullptr))
+            return false;
+        if (available < needed) return false;
+
+        uint64_t handleValue = 0;
+        if (!readAll(pipeHandle_, &handleValue, sizeof(handleValue))) return false;
+        outHandle = reinterpret_cast<HANDLE>(handleValue);
+
+        if (data && dataLen > 0) {
+            if (!readAll(pipeHandle_, data, static_cast<DWORD>(dataLen))) return false;
+        }
+        return true;
+    }
+
     bool sendData(const void* data, size_t len) override {
         if (pipeHandle_ == INVALID_HANDLE_VALUE) return false;
         return writeAll(pipeHandle_, data, static_cast<DWORD>(len));

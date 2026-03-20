@@ -154,18 +154,35 @@ static volatile sig_atomic_t g_running = 1;
 
 static VkInstance        g_instance       = VK_NULL_HANDLE;
 static VkDevice          g_device         = VK_NULL_HANDLE;
-static VkImage           g_image          = VK_NULL_HANDLE;
-static VkDeviceMemory    g_memory         = VK_NULL_HANDLE;
 static VkCommandPool     g_commandPool    = VK_NULL_HANDLE;
-static VkImageView       g_imageView      = VK_NULL_HANDLE;
 static VkRenderPass      g_renderPass     = VK_NULL_HANDLE;
-static VkFramebuffer     g_framebuffer    = VK_NULL_HANDLE;
 static VkPipelineLayout  g_pipelineLayout = VK_NULL_HANDLE;
 static VkPipeline        g_pipeline       = VK_NULL_HANDLE;
 static VkShaderModule    g_vertModule     = VK_NULL_HANDLE;
 static VkShaderModule    g_fragModule     = VK_NULL_HANDLE;
-static SharedMemoryHandle g_memoryHandle  = kInvalidMemoryHandle;
 static HandleTransport*  g_transport      = nullptr;
+
+// Function pointer for exporting memory handles (loaded once in main)
+#ifdef _WIN32
+static PFN_vkGetMemoryWin32HandleKHR g_pfnGetMemoryHandle = nullptr;
+#else
+static PFN_vkGetMemoryFdKHR g_pfnGetMemoryHandle = nullptr;
+#endif
+
+// ---------------------------------------------------------------------------
+// SharedImage: groups image + memory + export handle for resize support
+// ---------------------------------------------------------------------------
+struct SharedImage {
+    VkImage image              = VK_NULL_HANDLE;
+    VkDeviceMemory memory      = VK_NULL_HANDLE;
+    VkImageView imageView      = VK_NULL_HANDLE;
+    VkFramebuffer framebuffer  = VK_NULL_HANDLE;
+    SharedMemoryHandle handle  = kInvalidMemoryHandle;
+    uint32_t width             = 0;
+    uint32_t height            = 0;
+    VkDeviceSize memorySize    = 0;
+    uint32_t memoryTypeBits    = 0;
+};
 
 #ifdef _WIN32
 static BOOL WINAPI consoleHandler(DWORD) {
@@ -219,6 +236,157 @@ struct PushConstants {
     float aspectRatio;
     float scale;
 };
+
+// ---------------------------------------------------------------------------
+// Create / destroy shared image helpers
+// ---------------------------------------------------------------------------
+static SharedImage createSharedImage(VkDevice device, VkPhysicalDevice physDev,
+                                      VkRenderPass renderPass,
+                                      uint32_t width, uint32_t height, VkFormat format) {
+    SharedImage si{};
+    si.width  = width;
+    si.height = height;
+
+    // Create image with external memory support
+    VkExternalMemoryImageCreateInfo extMemImageCI{};
+    extMemImageCI.sType       = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO;
+    extMemImageCI.pNext       = nullptr;
+    extMemImageCI.handleTypes = kExternalMemoryHandleType;
+
+    VkImageCreateInfo imageCI{};
+    imageCI.sType                 = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+    imageCI.pNext                 = &extMemImageCI;
+    imageCI.flags                 = 0;
+    imageCI.imageType             = VK_IMAGE_TYPE_2D;
+    imageCI.format                = format;
+    imageCI.extent                = { width, height, 1 };
+    imageCI.mipLevels             = 1;
+    imageCI.arrayLayers           = 1;
+    imageCI.samples               = VK_SAMPLE_COUNT_1_BIT;
+    imageCI.tiling                = VK_IMAGE_TILING_OPTIMAL;
+    imageCI.usage                 = VK_IMAGE_USAGE_TRANSFER_DST_BIT |
+                                    VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
+                                    VK_IMAGE_USAGE_SAMPLED_BIT |
+                                    VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+    imageCI.sharingMode           = VK_SHARING_MODE_EXCLUSIVE;
+    imageCI.queueFamilyIndexCount = 0;
+    imageCI.pQueueFamilyIndices   = nullptr;
+    imageCI.initialLayout         = VK_IMAGE_LAYOUT_UNDEFINED;
+
+    VK_CHECK(vkCreateImage(device, &imageCI, nullptr, &si.image));
+
+    // Get memory requirements
+    VkMemoryRequirements memReqs;
+    vkGetImageMemoryRequirements(device, si.image, &memReqs);
+    si.memorySize    = memReqs.size;
+    si.memoryTypeBits = memReqs.memoryTypeBits;
+
+    // Allocate exportable memory
+    VkExportMemoryAllocateInfo exportAllocInfo{};
+    exportAllocInfo.sType       = VK_STRUCTURE_TYPE_EXPORT_MEMORY_ALLOCATE_INFO;
+    exportAllocInfo.pNext       = nullptr;
+    exportAllocInfo.handleTypes = kExternalMemoryHandleType;
+
+    uint32_t memTypeIndex = findMemoryType(physDev, memReqs.memoryTypeBits,
+                                           VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+
+    VkMemoryAllocateInfo allocInfo{};
+    allocInfo.sType           = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+    allocInfo.pNext           = &exportAllocInfo;
+    allocInfo.allocationSize  = memReqs.size;
+    allocInfo.memoryTypeIndex = memTypeIndex;
+
+    VK_CHECK(vkAllocateMemory(device, &allocInfo, nullptr, &si.memory));
+    VK_CHECK(vkBindImageMemory(device, si.image, si.memory, 0));
+
+    // Export the memory handle
+#ifdef _WIN32
+    VkMemoryGetWin32HandleInfoKHR getHandleInfo{};
+    getHandleInfo.sType      = VK_STRUCTURE_TYPE_MEMORY_GET_WIN32_HANDLE_INFO_KHR;
+    getHandleInfo.memory     = si.memory;
+    getHandleInfo.handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_BIT;
+    VK_CHECK(g_pfnGetMemoryHandle(device, &getHandleInfo, &si.handle));
+#else
+    VkMemoryGetFdInfoKHR getFdInfo{};
+    getFdInfo.sType      = VK_STRUCTURE_TYPE_MEMORY_GET_FD_INFO_KHR;
+    getFdInfo.pNext      = nullptr;
+    getFdInfo.memory     = si.memory;
+    getFdInfo.handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT_KHR;
+    VK_CHECK(g_pfnGetMemoryHandle(device, &getFdInfo, &si.handle));
+#endif
+
+    fprintf(stderr, "[test_renderer] Exported memory handle for %ux%u image\n", width, height);
+
+    // Create image view
+    VkImageViewCreateInfo viewCI{};
+    viewCI.sType                           = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+    viewCI.pNext                           = nullptr;
+    viewCI.flags                           = 0;
+    viewCI.image                           = si.image;
+    viewCI.viewType                        = VK_IMAGE_VIEW_TYPE_2D;
+    viewCI.format                          = format;
+    viewCI.components.r                    = VK_COMPONENT_SWIZZLE_IDENTITY;
+    viewCI.components.g                    = VK_COMPONENT_SWIZZLE_IDENTITY;
+    viewCI.components.b                    = VK_COMPONENT_SWIZZLE_IDENTITY;
+    viewCI.components.a                    = VK_COMPONENT_SWIZZLE_IDENTITY;
+    viewCI.subresourceRange.aspectMask     = VK_IMAGE_ASPECT_COLOR_BIT;
+    viewCI.subresourceRange.baseMipLevel   = 0;
+    viewCI.subresourceRange.levelCount     = 1;
+    viewCI.subresourceRange.baseArrayLayer = 0;
+    viewCI.subresourceRange.layerCount     = 1;
+
+    VK_CHECK(vkCreateImageView(device, &viewCI, nullptr, &si.imageView));
+
+    // Create framebuffer
+    VkFramebufferCreateInfo fbCI{};
+    fbCI.sType           = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
+    fbCI.pNext           = nullptr;
+    fbCI.flags           = 0;
+    fbCI.renderPass      = renderPass;
+    fbCI.attachmentCount = 1;
+    fbCI.pAttachments    = &si.imageView;
+    fbCI.width           = width;
+    fbCI.height          = height;
+    fbCI.layers          = 1;
+
+    VK_CHECK(vkCreateFramebuffer(device, &fbCI, nullptr, &si.framebuffer));
+
+    return si;
+}
+
+static void destroySharedImage(VkDevice device, SharedImage& img) {
+    if (img.framebuffer != VK_NULL_HANDLE) {
+        vkDestroyFramebuffer(device, img.framebuffer, nullptr);
+        img.framebuffer = VK_NULL_HANDLE;
+    }
+    if (img.imageView != VK_NULL_HANDLE) {
+        vkDestroyImageView(device, img.imageView, nullptr);
+        img.imageView = VK_NULL_HANDLE;
+    }
+    if (img.image != VK_NULL_HANDLE) {
+        vkDestroyImage(device, img.image, nullptr);
+        img.image = VK_NULL_HANDLE;
+    }
+    if (img.memory != VK_NULL_HANDLE) {
+        vkFreeMemory(device, img.memory, nullptr);
+        img.memory = VK_NULL_HANDLE;
+    }
+#ifdef _WIN32
+    if (img.handle != kInvalidMemoryHandle) {
+        CloseHandle(img.handle);
+        img.handle = kInvalidMemoryHandle;
+    }
+#else
+    if (img.handle != kInvalidMemoryHandle) {
+        ::close(img.handle);
+        img.handle = kInvalidMemoryHandle;
+    }
+#endif
+    img.width  = 0;
+    img.height = 0;
+    img.memorySize    = 0;
+    img.memoryTypeBits = 0;
+}
 
 // ---------------------------------------------------------------------------
 // main
@@ -401,128 +569,30 @@ int main(int argc, char* argv[]) {
     VK_CHECK(vkCreateCommandPool(g_device, &poolCI, nullptr, &g_commandPool));
 
     // -----------------------------------------------------------------------
-    // 5. Create exportable shared image (640x480, R8G8B8A8_UNORM)
+    // 5. Load memory export function pointer and create shared image
     // -----------------------------------------------------------------------
-    const uint32_t imageWidth  = 640;
-    const uint32_t imageHeight = 480;
-    const VkFormat imageFormat = VK_FORMAT_R8G8B8A8_UNORM;
+    const uint32_t initialWidth  = 640;
+    const uint32_t initialHeight = 480;
+    const VkFormat imageFormat   = VK_FORMAT_R8G8B8A8_UNORM;
 
-    fprintf(stderr, "[test_renderer] Creating exportable image %ux%u...\n", imageWidth, imageHeight);
-
-    VkExternalMemoryImageCreateInfo extMemImageCI{};
-    extMemImageCI.sType       = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO;
-    extMemImageCI.pNext       = nullptr;
-    extMemImageCI.handleTypes = kExternalMemoryHandleType;
-
-    VkImageCreateInfo imageCI{};
-    imageCI.sType                 = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
-    imageCI.pNext                 = &extMemImageCI;
-    imageCI.flags                 = 0;
-    imageCI.imageType             = VK_IMAGE_TYPE_2D;
-    imageCI.format                = imageFormat;
-    imageCI.extent                = { imageWidth, imageHeight, 1 };
-    imageCI.mipLevels             = 1;
-    imageCI.arrayLayers           = 1;
-    imageCI.samples               = VK_SAMPLE_COUNT_1_BIT;
-    imageCI.tiling                = VK_IMAGE_TILING_OPTIMAL;
-    imageCI.usage                 = VK_IMAGE_USAGE_TRANSFER_DST_BIT |
-                                    VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
-                                    VK_IMAGE_USAGE_SAMPLED_BIT |
-                                    VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
-    imageCI.sharingMode           = VK_SHARING_MODE_EXCLUSIVE;
-    imageCI.queueFamilyIndexCount = 0;
-    imageCI.pQueueFamilyIndices   = nullptr;
-    imageCI.initialLayout         = VK_IMAGE_LAYOUT_UNDEFINED;
-
-    VK_CHECK(vkCreateImage(g_device, &imageCI, nullptr, &g_image));
-
-    // Get memory requirements
-    VkMemoryRequirements memReqs;
-    vkGetImageMemoryRequirements(g_device, g_image, &memReqs);
-
-    fprintf(stderr, "[test_renderer] Memory requirements: size=%llu, alignment=%llu, typeBits=0x%x\n",
-            (unsigned long long)memReqs.size,
-            (unsigned long long)memReqs.alignment,
-            memReqs.memoryTypeBits);
-
-    // Allocate exportable memory
-    VkExportMemoryAllocateInfo exportAllocInfo{};
-    exportAllocInfo.sType       = VK_STRUCTURE_TYPE_EXPORT_MEMORY_ALLOCATE_INFO;
-    exportAllocInfo.pNext       = nullptr;
-    exportAllocInfo.handleTypes = kExternalMemoryHandleType;
-
-    uint32_t memTypeIndex = findMemoryType(physDev, memReqs.memoryTypeBits,
-                                           VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-
-    VkMemoryAllocateInfo allocInfo{};
-    allocInfo.sType           = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-    allocInfo.pNext           = &exportAllocInfo;
-    allocInfo.allocationSize  = memReqs.size;
-    allocInfo.memoryTypeIndex = memTypeIndex;
-
-    VK_CHECK(vkAllocateMemory(g_device, &allocInfo, nullptr, &g_memory));
-    VK_CHECK(vkBindImageMemory(g_device, g_image, g_memory, 0));
-    fprintf(stderr, "[test_renderer] Image created and memory bound\n");
-
-    // Export the memory handle (only once -- each call creates a new handle)
 #ifdef _WIN32
-    auto pfnGetMemoryWin32HandleKHR = reinterpret_cast<PFN_vkGetMemoryWin32HandleKHR>(
+    g_pfnGetMemoryHandle = reinterpret_cast<PFN_vkGetMemoryWin32HandleKHR>(
         vkGetDeviceProcAddr(g_device, "vkGetMemoryWin32HandleKHR"));
-    if (!pfnGetMemoryWin32HandleKHR) {
+    if (!g_pfnGetMemoryHandle) {
         fprintf(stderr, "Failed to load vkGetMemoryWin32HandleKHR\n");
         return 1;
     }
-
-    VkMemoryGetWin32HandleInfoKHR getHandleInfo{};
-    getHandleInfo.sType      = VK_STRUCTURE_TYPE_MEMORY_GET_WIN32_HANDLE_INFO_KHR;
-    getHandleInfo.memory     = g_memory;
-    getHandleInfo.handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_BIT;
-
-    VK_CHECK(pfnGetMemoryWin32HandleKHR(g_device, &getHandleInfo, &g_memoryHandle));
-    fprintf(stderr, "[test_renderer] Exported memory handle\n");
 #else
-    auto pfnGetMemoryFdKHR = reinterpret_cast<PFN_vkGetMemoryFdKHR>(
+    g_pfnGetMemoryHandle = reinterpret_cast<PFN_vkGetMemoryFdKHR>(
         vkGetDeviceProcAddr(g_device, "vkGetMemoryFdKHR"));
-    if (!pfnGetMemoryFdKHR) {
+    if (!g_pfnGetMemoryHandle) {
         fprintf(stderr, "Failed to load vkGetMemoryFdKHR\n");
         return 1;
     }
-
-    VkMemoryGetFdInfoKHR getFdInfo{};
-    getFdInfo.sType      = VK_STRUCTURE_TYPE_MEMORY_GET_FD_INFO_KHR;
-    getFdInfo.pNext      = nullptr;
-    getFdInfo.memory     = g_memory;
-    getFdInfo.handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT_KHR;
-
-    VK_CHECK(pfnGetMemoryFdKHR(g_device, &getFdInfo, &g_memoryHandle));
-    fprintf(stderr, "[test_renderer] Exported memory fd = %d\n", g_memoryHandle);
 #endif
 
     // -----------------------------------------------------------------------
-    // 6. Create VkImageView for the shared image
-    // -----------------------------------------------------------------------
-    VkImageViewCreateInfo viewCI{};
-    viewCI.sType                           = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
-    viewCI.pNext                           = nullptr;
-    viewCI.flags                           = 0;
-    viewCI.image                           = g_image;
-    viewCI.viewType                        = VK_IMAGE_VIEW_TYPE_2D;
-    viewCI.format                          = imageFormat;
-    viewCI.components.r                    = VK_COMPONENT_SWIZZLE_IDENTITY;
-    viewCI.components.g                    = VK_COMPONENT_SWIZZLE_IDENTITY;
-    viewCI.components.b                    = VK_COMPONENT_SWIZZLE_IDENTITY;
-    viewCI.components.a                    = VK_COMPONENT_SWIZZLE_IDENTITY;
-    viewCI.subresourceRange.aspectMask     = VK_IMAGE_ASPECT_COLOR_BIT;
-    viewCI.subresourceRange.baseMipLevel   = 0;
-    viewCI.subresourceRange.levelCount     = 1;
-    viewCI.subresourceRange.baseArrayLayer = 0;
-    viewCI.subresourceRange.layerCount     = 1;
-
-    VK_CHECK(vkCreateImageView(g_device, &viewCI, nullptr, &g_imageView));
-    fprintf(stderr, "[test_renderer] ImageView created\n");
-
-    // -----------------------------------------------------------------------
-    // 7. Create render pass
+    // 6. Create render pass
     // -----------------------------------------------------------------------
     VkAttachmentDescription colorAttachment{};
     colorAttachment.format         = imageFormat;
@@ -564,24 +634,15 @@ int main(int argc, char* argv[]) {
     fprintf(stderr, "[test_renderer] RenderPass created\n");
 
     // -----------------------------------------------------------------------
-    // 8. Create framebuffer
+    // 7. Create shared image (image + memory + export + imageview + framebuffer)
     // -----------------------------------------------------------------------
-    VkFramebufferCreateInfo fbCI{};
-    fbCI.sType           = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
-    fbCI.pNext           = nullptr;
-    fbCI.flags           = 0;
-    fbCI.renderPass      = g_renderPass;
-    fbCI.attachmentCount = 1;
-    fbCI.pAttachments    = &g_imageView;
-    fbCI.width           = imageWidth;
-    fbCI.height          = imageHeight;
-    fbCI.layers          = 1;
-
-    VK_CHECK(vkCreateFramebuffer(g_device, &fbCI, nullptr, &g_framebuffer));
-    fprintf(stderr, "[test_renderer] Framebuffer created\n");
+    fprintf(stderr, "[test_renderer] Creating exportable image %ux%u...\n", initialWidth, initialHeight);
+    SharedImage sharedImg = createSharedImage(g_device, physDev, g_renderPass,
+                                              initialWidth, initialHeight, imageFormat);
+    fprintf(stderr, "[test_renderer] Shared image created\n");
 
     // -----------------------------------------------------------------------
-    // 9. Create shader modules
+    // 8. Create shader modules
     // -----------------------------------------------------------------------
     g_vertModule = createShaderModule(g_device, vertShaderSpirv, sizeof(vertShaderSpirv));
     g_fragModule = createShaderModule(g_device, fragShaderSpirv, sizeof(fragShaderSpirv));
@@ -639,14 +700,14 @@ int main(int argc, char* argv[]) {
     VkViewport viewport{};
     viewport.x        = 0.0f;
     viewport.y        = 0.0f;
-    viewport.width    = static_cast<float>(imageWidth);
-    viewport.height   = static_cast<float>(imageHeight);
+    viewport.width    = static_cast<float>(initialWidth);
+    viewport.height   = static_cast<float>(initialHeight);
     viewport.minDepth = 0.0f;
     viewport.maxDepth = 1.0f;
 
     VkRect2D scissor{};
     scissor.offset = {0, 0};
-    scissor.extent = {imageWidth, imageHeight};
+    scissor.extent = {initialWidth, initialHeight};
 
     VkPipelineViewportStateCreateInfo viewportCI{};
     viewportCI.sType         = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
@@ -737,13 +798,13 @@ int main(int argc, char* argv[]) {
     fprintf(stderr, "[test_renderer] Presenter connected\n");
 
     SharedSurfaceInfo surfaceInfo{};
-    surfaceInfo.width          = imageWidth;
-    surfaceInfo.height         = imageHeight;
+    surfaceInfo.width          = sharedImg.width;
+    surfaceInfo.height         = sharedImg.height;
     surfaceInfo.format         = imageFormat;
-    surfaceInfo.memorySize     = memReqs.size;
-    surfaceInfo.memoryTypeBits = memReqs.memoryTypeBits;
+    surfaceInfo.memorySize     = sharedImg.memorySize;
+    surfaceInfo.memoryTypeBits = sharedImg.memoryTypeBits;
 
-    if (!transport->sendHandle(g_memoryHandle, &surfaceInfo, sizeof(surfaceInfo))) {
+    if (!transport->sendHandle(sharedImg.handle, &surfaceInfo, sizeof(surfaceInfo))) {
         fprintf(stderr, "Failed to send handle\n");
         return 1;
     }
@@ -774,7 +835,6 @@ int main(int argc, char* argv[]) {
     // 14. Render loop: spinning triangle with input
     // -----------------------------------------------------------------------
     const float baseRotationSpeed = 1.0f; // radians per second
-    const float aspectRatio = static_cast<float>(imageWidth) / static_cast<float>(imageHeight);
     auto startTime = std::chrono::steady_clock::now();
 
     float dragAngleOffset = 0.0f;  // accumulated from mouse drag
@@ -802,6 +862,27 @@ int main(int argc, char* argv[]) {
                     // SDL scancode for space is 44
                     if (ie.key.scancode == 44) paused = !paused;
                     break;
+                case InputEventType::Resize: {
+                    uint32_t newW = ie.resize.width;
+                    uint32_t newH = ie.resize.height;
+                    if (newW > 0 && newH > 0 && (newW != sharedImg.width || newH != sharedImg.height)) {
+                        vkDeviceWaitIdle(g_device);
+                        destroySharedImage(g_device, sharedImg);
+                        sharedImg = createSharedImage(g_device, physDev, g_renderPass, newW, newH, imageFormat);
+
+                        // Send new surface to presenter
+                        SharedSurfaceInfo si{};
+                        si.width = sharedImg.width;
+                        si.height = sharedImg.height;
+                        si.format = imageFormat;
+                        si.memorySize = sharedImg.memorySize;
+                        si.memoryTypeBits = sharedImg.memoryTypeBits;
+                        transport->sendHandle(sharedImg.handle, &si, sizeof(si));
+
+                        fprintf(stderr, "[test_renderer] Resized to %ux%u\n", newW, newH);
+                    }
+                    break;
+                }
                 default:
                     break;
             }
@@ -832,9 +913,9 @@ int main(int argc, char* argv[]) {
         rpBeginInfo.sType             = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
         rpBeginInfo.pNext             = nullptr;
         rpBeginInfo.renderPass        = g_renderPass;
-        rpBeginInfo.framebuffer       = g_framebuffer;
+        rpBeginInfo.framebuffer       = sharedImg.framebuffer;
         rpBeginInfo.renderArea.offset = {0, 0};
-        rpBeginInfo.renderArea.extent = {imageWidth, imageHeight};
+        rpBeginInfo.renderArea.extent = {sharedImg.width, sharedImg.height};
         rpBeginInfo.clearValueCount   = 1;
         rpBeginInfo.pClearValues      = &clearValue;
 
@@ -844,21 +925,22 @@ int main(int argc, char* argv[]) {
         VkViewport vp{};
         vp.x        = 0.0f;
         vp.y        = 0.0f;
-        vp.width    = static_cast<float>(imageWidth);
-        vp.height   = static_cast<float>(imageHeight);
+        vp.width    = static_cast<float>(sharedImg.width);
+        vp.height   = static_cast<float>(sharedImg.height);
         vp.minDepth = 0.0f;
         vp.maxDepth = 1.0f;
         vkCmdSetViewport(cmdBuf, 0, 1, &vp);
 
         VkRect2D sc{};
         sc.offset = {0, 0};
-        sc.extent = {imageWidth, imageHeight};
+        sc.extent = {sharedImg.width, sharedImg.height};
         vkCmdSetScissor(cmdBuf, 0, 1, &sc);
 
         // Bind pipeline
         vkCmdBindPipeline(cmdBuf, VK_PIPELINE_BIND_POINT_GRAPHICS, g_pipeline);
 
         // Push constants
+        float aspectRatio = static_cast<float>(sharedImg.width) / static_cast<float>(sharedImg.height);
         PushConstants pc;
         pc.angle       = angle;
         pc.aspectRatio = aspectRatio;
@@ -912,25 +994,10 @@ int main(int argc, char* argv[]) {
     vkDestroyPipelineLayout(g_device, g_pipelineLayout, nullptr);
     vkDestroyShaderModule(g_device, g_vertModule, nullptr);
     vkDestroyShaderModule(g_device, g_fragModule, nullptr);
-    vkDestroyFramebuffer(g_device, g_framebuffer, nullptr);
+    destroySharedImage(g_device, sharedImg);
     vkDestroyRenderPass(g_device, g_renderPass, nullptr);
-    vkDestroyImageView(g_device, g_imageView, nullptr);
-
-#ifdef _WIN32
-    if (g_memoryHandle != kInvalidMemoryHandle) {
-        CloseHandle(g_memoryHandle);
-        g_memoryHandle = kInvalidMemoryHandle;
-    }
-#else
-    if (g_memoryHandle != kInvalidMemoryHandle) {
-        ::close(g_memoryHandle);
-        g_memoryHandle = kInvalidMemoryHandle;
-    }
-#endif
 
     vkDestroyCommandPool(g_device, g_commandPool, nullptr);
-    vkDestroyImage(g_device, g_image, nullptr);
-    vkFreeMemory(g_device, g_memory, nullptr);
     vkDestroyDevice(g_device, nullptr);
     vkDestroyInstance(g_instance, nullptr);
 

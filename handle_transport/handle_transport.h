@@ -33,6 +33,10 @@ public:
     // Sets outLen to bytes actually read.
     virtual bool recvDataNonBlocking(void* data, size_t maxLen, size_t& outLen) = 0;
 
+    // Non-blocking version of recvHandle. Returns false if nothing available.
+    virtual bool recvHandleNonBlocking(SharedMemoryHandle& outHandle,
+                                       void* data, size_t dataLen) = 0;
+
     virtual void close() = 0;
 
     // Cancel a blocking accept(). Safe to call from a signal/ctrl handler.

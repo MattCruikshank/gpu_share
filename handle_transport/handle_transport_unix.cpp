@@ -191,6 +191,45 @@ public:
         return true;
     }
 
+    bool recvHandleNonBlocking(SharedMemoryHandle& outHandle,
+                                void* data, size_t dataLen) override {
+        if (connFd_ < 0) return false;
+        outHandle = kInvalidMemoryHandle;
+
+        char dummy = 0;
+        struct iovec iov{};
+        if (data && dataLen > 0) {
+            iov.iov_base = data;
+            iov.iov_len = dataLen;
+        } else {
+            iov.iov_base = &dummy;
+            iov.iov_len = 1;
+        }
+
+        union {
+            char buf[CMSG_SPACE(sizeof(int))];
+            struct cmsghdr align;
+        } cmsgBuf{};
+
+        struct msghdr msg{};
+        msg.msg_iov = &iov;
+        msg.msg_iovlen = 1;
+        msg.msg_control = cmsgBuf.buf;
+        msg.msg_controllen = sizeof(cmsgBuf.buf);
+
+        ssize_t received = recvmsg(connFd_, &msg, MSG_DONTWAIT);
+        if (received <= 0) return false;
+
+        struct cmsghdr* cmsg = CMSG_FIRSTHDR(&msg);
+        if (!cmsg || cmsg->cmsg_level != SOL_SOCKET ||
+            cmsg->cmsg_type != SCM_RIGHTS ||
+            cmsg->cmsg_len != CMSG_LEN(sizeof(int))) {
+            return false;
+        }
+        memcpy(&outHandle, CMSG_DATA(cmsg), sizeof(int));
+        return true;
+    }
+
     bool sendData(const void* data, size_t len) override {
         if (connFd_ < 0) return false;
         const char* ptr = static_cast<const char*>(data);

@@ -92,9 +92,18 @@ int main(int argc, char* argv[]) {
                 event.key.key == SDLK_ESCAPE) {
                 running = false;
             }
-            if (event.type == SDL_EVENT_WINDOW_RESIZED ||
-                event.type == SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED) {
+            if (event.type == SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED) {
                 vkCtx.notifyResized();
+                // Tell renderer to resize its shared surface
+                if (hasImportedSurface) {
+                    int pw, ph;
+                    SDL_GetWindowSizeInPixels(window, &pw, &ph);
+                    InputEvent re{};
+                    re.type = InputEventType::Resize;
+                    re.resize.width = static_cast<uint32_t>(pw);
+                    re.resize.height = static_cast<uint32_t>(ph);
+                    forwardEvent(transport.get(), re);
+                }
             }
 
             // Forward input to renderer
@@ -135,6 +144,18 @@ int main(int argc, char* argv[]) {
             if (send && hasImportedSurface) {
                 forwardEvent(transport.get(), ie);
             }
+        }
+
+        // Check if renderer sent a new shared surface (after resize)
+        SharedMemoryHandle newHandle = kInvalidMemoryHandle;
+        SharedSurfaceInfo newInfo{};
+        if (transport->recvHandleNonBlocking(newHandle, &newInfo, sizeof(newInfo))) {
+            vkDeviceWaitIdle(vkCtx.getDevice());
+            imported.destroy(vkCtx.getDevice());
+            imported = importSurface(vkCtx.getDevice(), vkCtx.getPhysicalDevice(),
+                                     newHandle, newInfo);
+            hasImportedSurface = (imported.image != VK_NULL_HANDLE);
+            fprintf(stderr, "Re-imported surface: %ux%u\n", newInfo.width, newInfo.height);
         }
 
         uint32_t imageIndex = 0;

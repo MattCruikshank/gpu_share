@@ -9,6 +9,7 @@ enum class InputEventType : uint8_t {
     MouseWheel,
     KeyDown,
     KeyUp,
+    Resize,
 };
 
 struct InputEvent {
@@ -20,6 +21,7 @@ struct InputEvent {
         struct { uint8_t button; uint8_t pressed; float x, y; } mouseButton;
         struct { float scrollY; } wheel;
         struct { uint32_t scancode; } key;
+        struct { uint32_t width, height; } resize;
     };
 };
 
