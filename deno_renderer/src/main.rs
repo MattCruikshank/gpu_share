@@ -10,13 +10,13 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 #[cfg(unix)]
-type NativeHandle = i32;    // fd
+type NativeHandle = i32; // fd
 #[cfg(windows)]
-type NativeHandle = isize;  // HANDLE as isize for easy storage
+type NativeHandle = *mut std::ffi::c_void; // HANDLE
 #[cfg(unix)]
 const INVALID_HANDLE: NativeHandle = -1;
 #[cfg(windows)]
-const INVALID_HANDLE: NativeHandle = 0;  // NULL HANDLE
+const INVALID_HANDLE: NativeHandle = std::ptr::null_mut();
 
 // ---------------------------------------------------------------------------
 // SharedSurfaceInfo — must match the C++ layout exactly (C ABI)
@@ -112,7 +112,7 @@ mod transport {
         #[allow(dead_code)]
         remote_pid: u32,
         #[cfg(windows)]
-        remote_process: isize,  // HANDLE from OpenProcess
+        remote_process: *mut std::ffi::c_void,  // HANDLE from OpenProcess
     }
 
     fn write_all(stream: &mut TcpStream, data: &[u8]) -> Result<(), String> {
@@ -130,7 +130,7 @@ mod transport {
                 stream: None,
                 remote_pid: 0,
                 #[cfg(windows)]
-                remote_process: 0,
+                remote_process: std::ptr::null_mut(),
             }
         }
 
@@ -174,7 +174,7 @@ mod transport {
                 use windows_sys::Win32::System::Threading::OpenProcess;
                 use windows_sys::Win32::System::Threading::PROCESS_DUP_HANDLE;
                 self.remote_process = unsafe { OpenProcess(PROCESS_DUP_HANDLE, 0, self.remote_pid) };
-                if self.remote_process == 0 {
+                if self.remote_process.is_null() {
                     return Err(format!("OpenProcess({}) failed", self.remote_pid));
                 }
             }
@@ -200,7 +200,7 @@ mod transport {
             let handle_val = {
                 use windows_sys::Win32::Foundation::{DuplicateHandle, DUPLICATE_SAME_ACCESS};
                 use windows_sys::Win32::System::Threading::GetCurrentProcess;
-                let mut remote_handle: isize = 0;
+                let mut remote_handle: *mut std::ffi::c_void = std::ptr::null_mut();
                 let ok = unsafe {
                     DuplicateHandle(
                         GetCurrentProcess(),
@@ -245,9 +245,9 @@ mod transport {
             self.stream = None;
             self.listener = None;
             #[cfg(windows)]
-            if self.remote_process != 0 {
+            if !self.remote_process.is_null() {
                 unsafe { windows_sys::Win32::Foundation::CloseHandle(self.remote_process); }
-                self.remote_process = 0;
+                self.remote_process = std::ptr::null_mut();
             }
         }
     }
@@ -381,7 +381,7 @@ unsafe fn create_shared_image(
     };
 
     eprintln!(
-        "[deno_renderer] Exported memory handle={} for {}x{} image (size={})",
+        "[deno_renderer] Exported memory handle={:?} for {}x{} image (size={})",
         handle, width, height, mem_reqs.size
     );
 
