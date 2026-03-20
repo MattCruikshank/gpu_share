@@ -3,3 +3,4 @@ build/
 *.o
 *.d
 compile_commands.json
+deno_renderer/target/

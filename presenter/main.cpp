@@ -93,25 +93,30 @@ struct ChildProcess {
 // ---------------------------------------------------------------------------
 // Find the renderer executable next to the presenter
 // ---------------------------------------------------------------------------
-static std::string findRendererExe(const char* presenterArgv0) {
+static bool fileExists(const std::string& path) {
+    FILE* f = fopen(path.c_str(), "rb");
+    if (f) { fclose(f); return true; }
+    return false;
+}
+
+static std::string findExe(const char* presenterArgv0, const std::string& name) {
     std::string path(presenterArgv0);
     auto lastSep = path.find_last_of("/\\");
 
-    // Same directory (Linux single-config build, or manual placement)
+#ifdef _WIN32
+    std::string ext = ".exe";
+#else
+    std::string ext;
+#endif
+
+    // Same directory as presenter
     std::string sameDir;
     if (lastSep != std::string::npos)
         sameDir = path.substr(0, lastSep + 1);
-#ifdef _WIN32
-    std::string candidate = sameDir + "test_renderer.exe";
-#else
-    std::string candidate = sameDir + "test_renderer";
-#endif
-    // Check if it exists there
-    FILE* f = fopen(candidate.c_str(), "rb");
-    if (f) { fclose(f); return candidate; }
+    std::string candidate = sameDir + name + ext;
+    if (fileExists(candidate)) return candidate;
 
-    // MSVC multi-config layout: build/presenter/Debug/ → build/test_renderer/Debug/
-    // Go up two levels from the exe directory
+    // MSVC multi-config: build/presenter/Debug/ → build/<name>/Debug/
     if (lastSep != std::string::npos) {
         auto configSep = path.find_last_of("/\\", lastSep - 1);
         if (configSep != std::string::npos) {
@@ -119,23 +124,27 @@ static std::string findRendererExe(const char* presenterArgv0) {
             auto parentSep = path.find_last_of("/\\", configSep - 1);
             if (parentSep != std::string::npos) {
                 std::string buildRoot = path.substr(0, parentSep + 1);
-#ifdef _WIN32
-                candidate = buildRoot + "test_renderer" + configDir + "test_renderer.exe";
-#else
-                candidate = buildRoot + "test_renderer" + configDir + "test_renderer";
-#endif
-                f = fopen(candidate.c_str(), "rb");
-                if (f) { fclose(f); return candidate; }
+                candidate = buildRoot + name + configDir + name + ext;
+                if (fileExists(candidate)) return candidate;
             }
         }
     }
 
-    // Fallback: hope it's on PATH
-#ifdef _WIN32
-    return "test_renderer.exe";
-#else
-    return "test_renderer";
-#endif
+    // Cargo build: relative to project root — deno_renderer/target/debug/
+    if (lastSep != std::string::npos) {
+        // Walk up to find the project root (look for Cargo.toml or CMakeLists.txt)
+        std::string dir = path.substr(0, lastSep);
+        for (int i = 0; i < 5; i++) {
+            candidate = dir + "/" + name + "/target/debug/" + name + ext;
+            if (fileExists(candidate)) return candidate;
+            auto up = dir.find_last_of("/\\");
+            if (up == std::string::npos) break;
+            dir = dir.substr(0, up);
+        }
+    }
+
+    // Fallback
+    return name + ext;
 }
 
 static void forwardEvent(HandleTransport* t, const InputEvent& ev) {
@@ -150,6 +159,7 @@ int main(int argc, char* argv[]) {
 #endif
     const char* rendererPath = nullptr;
     bool noSpawn = false;
+    bool useDeno = false;
 
     for (int i = 1; i < argc; i++) {
         if ((strcmp(argv[i], "--socket") == 0 || strcmp(argv[i], "-s") == 0) && i + 1 < argc) {
@@ -158,6 +168,8 @@ int main(int argc, char* argv[]) {
             rendererPath = argv[++i];
         } else if (strcmp(argv[i], "--no-spawn") == 0) {
             noSpawn = true;
+        } else if (strcmp(argv[i], "--deno") == 0) {
+            useDeno = true;
         }
     }
 
@@ -166,7 +178,8 @@ int main(int argc, char* argv[]) {
     if (rendererPath) {
         rendererExe = rendererPath;
     } else {
-        rendererExe = findRendererExe(argv[0]);
+        std::string name = useDeno ? "deno_renderer" : "test_renderer";
+        rendererExe = findExe(argv[0], name);
     }
 
     if (!SDL_Init(SDL_INIT_VIDEO)) {
