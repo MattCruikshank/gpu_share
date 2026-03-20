@@ -136,7 +136,6 @@ static std::string findExe(const char* presenterArgv0, const std::string& name) 
         for (int i = 0; i < 5; i++) {
             candidate = dir + sep + name + sep + "target" + sep + "debug" + sep + name + ext;
             if (fileExists(candidate)) return candidate;
-            // Also check release
             candidate = dir + sep + name + sep + "target" + sep + "release" + sep + name + ext;
             if (fileExists(candidate)) return candidate;
             auto up = dir.find_last_of("/\\");
@@ -144,6 +143,17 @@ static std::string findExe(const char* presenterArgv0, const std::string& name) 
             dir = dir.substr(0, up);
         }
     }
+
+    // Try from current working directory
+#ifdef _WIN32
+    std::string sep = "\\";
+#else
+    std::string sep = "/";
+#endif
+    candidate = name + sep + "target" + sep + "debug" + sep + name + ext;
+    if (fileExists(candidate)) return candidate;
+    candidate = name + sep + "target" + sep + "release" + sep + name + ext;
+    if (fileExists(candidate)) return candidate;
 
     // Fallback
     return name + ext;
