@@ -1185,14 +1185,11 @@ mod transport {
                 }
             }
 
-            // Spawn a reader thread that does blocking reads and sends
-            // complete events through a channel. The main thread polls
-            // with try_recv() — instant, never loses data.
-            let read_stream = self.stream.as_ref().unwrap().try_clone()
-                .map_err(|e| format!("Failed to clone stream: {}", e))?;
-            // Keep a separate clone for writes (send_handle)
+            // Move the original stream to the reader thread (avoid
+            // WSADuplicateSocket issues on Windows). Keep a clone for writes.
             self.write_stream = Some(self.stream.as_ref().unwrap().try_clone()
-                .map_err(|e| format!("Failed to clone write stream: {}", e))?);
+                .map_err(|e| format!("Failed to clone stream for writes: {}", e))?);
+            let read_stream = self.stream.take().unwrap(); // move original
 
             let (tx, rx) = mpsc::channel::<Vec<u8>>();
             self.event_rx = Some(rx);
@@ -1201,14 +1198,18 @@ mod transport {
             self.reader_thread = Some(std::thread::spawn(move || {
                 let mut stream = read_stream;
                 let mut buf = vec![0u8; event_size];
+                eprintln!("[transport] Reader thread started, waiting for {} byte events", event_size);
                 loop {
                     match stream.read_exact(&mut buf) {
                         Ok(()) => {
                             if tx.send(buf.clone()).is_err() {
-                                break; // receiver dropped, shutting down
+                                break;
                             }
                         }
-                        Err(_) => break, // connection closed or error
+                        Err(e) => {
+                            eprintln!("[transport] Reader thread exiting: {}", e);
+                            break;
+                        }
                     }
                 }
             }));
@@ -1255,16 +1256,11 @@ mod transport {
             Ok(())
         }
 
-        pub fn recv_data_non_blocking(&self, buf: &mut [u8]) -> Option<usize> {
+        pub fn recv_event(&self) -> Option<Vec<u8>> {
             let rx = self.event_rx.as_ref()?;
             match rx.try_recv() {
-                Ok(data) => {
-                    let len = data.len().min(buf.len());
-                    buf[..len].copy_from_slice(&data[..len]);
-                    Some(len)
-                }
-                Err(mpsc::TryRecvError::Empty) => None,
-                Err(mpsc::TryRecvError::Disconnected) => None,
+                Ok(data) => Some(data),
+                Err(_) => None,
             }
         }
 
@@ -1630,12 +1626,11 @@ fn main() {
             let start_time = std::time::Instant::now();
 
             while running.load(Ordering::Relaxed) {
-                // Poll for input events (non-blocking)
-                let mut event_buf = [0u8; std::mem::size_of::<InputEvent>()];
-                while let Some(n) = transport.recv_data_non_blocking(&mut event_buf) {
-                    if n == std::mem::size_of::<InputEvent>() {
+                // Poll for input events from reader thread (non-blocking channel drain)
+                while let Some(event_data) = transport.recv_event() {
+                    if event_data.len() == std::mem::size_of::<InputEvent>() {
                         let event: InputEvent =
-                            unsafe { std::ptr::read(event_buf.as_ptr() as *const InputEvent) };
+                            unsafe { std::ptr::read(event_data.as_ptr() as *const InputEvent) };
 
                         // Queue JSON event for TypeScript consumption
                         {
