@@ -1,6 +1,6 @@
 // deno_renderer: Headless Vulkan renderer with embedded Deno TypeScript runtime.
 // Creates an exportable VkImage, runs a TypeScript scene script to control
-// the clear color, and shares the image with the presenter via Unix socket.
+// the clear color, and shares the image with the presenter via TCP.
 
 use ash::vk;
 use deno_core::{op2, JsRuntime, OpState, RuntimeOptions};
@@ -91,173 +91,113 @@ fn op_log(#[string] msg: &str) {
 }
 
 // ---------------------------------------------------------------------------
-// Unix socket transport (Linux only)
+// TCP transport (cross-platform)
 // ---------------------------------------------------------------------------
-#[cfg(unix)]
 mod transport {
-    use std::os::unix::io::RawFd;
+    use std::io::{Read, Write};
+    use std::net::{TcpListener, TcpStream};
 
-    pub struct UnixTransport {
-        listen_fd: RawFd,
-        conn_fd: RawFd,
-        endpoint: String,
+    pub struct TcpTransport {
+        listener: Option<TcpListener>,
+        stream: Option<TcpStream>,
+        #[allow(dead_code)]
+        remote_pid: u32,
     }
 
-    impl UnixTransport {
+    fn write_all(stream: &mut TcpStream, data: &[u8]) -> Result<(), String> {
+        stream.write_all(data).map_err(|e| format!("write failed: {}", e))
+    }
+
+    fn read_exact(stream: &mut TcpStream, buf: &mut [u8]) -> Result<(), String> {
+        stream.read_exact(buf).map_err(|e| format!("read failed: {}", e))
+    }
+
+    impl TcpTransport {
         pub fn new() -> Self {
-            UnixTransport {
-                listen_fd: -1,
-                conn_fd: -1,
-                endpoint: String::new(),
+            TcpTransport {
+                listener: None,
+                stream: None,
+                remote_pid: 0,
             }
         }
 
-        pub fn listen(&mut self, endpoint: &str) -> Result<(), String> {
-            unsafe {
-                let fd = libc::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0);
-                if fd < 0 {
-                    return Err(format!("socket() failed: {}", std::io::Error::last_os_error()));
-                }
-
-                // Remove any existing socket file
-                let c_path = std::ffi::CString::new(endpoint).unwrap();
-                libc::unlink(c_path.as_ptr());
-
-                let mut addr: libc::sockaddr_un = std::mem::zeroed();
-                addr.sun_family = libc::AF_UNIX as libc::sa_family_t;
-                let path_bytes = endpoint.as_bytes();
-                let max_len = addr.sun_path.len() - 1;
-                let copy_len = path_bytes.len().min(max_len);
-                for i in 0..copy_len {
-                    addr.sun_path[i] = path_bytes[i] as libc::c_char;
-                }
-
-                let addr_len = std::mem::size_of::<libc::sa_family_t>() + copy_len + 1;
-                if libc::bind(
-                    fd,
-                    &addr as *const libc::sockaddr_un as *const libc::sockaddr,
-                    addr_len as libc::socklen_t,
-                ) < 0
-                {
-                    let err = std::io::Error::last_os_error();
-                    libc::close(fd);
-                    return Err(format!("bind({}) failed: {}", endpoint, err));
-                }
-
-                if libc::listen(fd, 1) < 0 {
-                    let err = std::io::Error::last_os_error();
-                    libc::close(fd);
-                    return Err(format!("listen() failed: {}", err));
-                }
-
-                self.listen_fd = fd;
-                self.endpoint = endpoint.to_string();
-                Ok(())
-            }
+        pub fn listen(&mut self, port: &str) -> Result<(), String> {
+            let addr = format!("127.0.0.1:{}", port);
+            let listener = TcpListener::bind(&addr)
+                .map_err(|e| format!("bind({}) failed: {}", addr, e))?;
+            self.listener = Some(listener);
+            Ok(())
         }
 
         pub fn accept(&mut self) -> Result<(), String> {
-            unsafe {
-                let fd = libc::accept(self.listen_fd, std::ptr::null_mut(), std::ptr::null_mut());
-                if fd < 0 {
-                    return Err(format!(
-                        "accept() failed: {}",
-                        std::io::Error::last_os_error()
-                    ));
-                }
-                self.conn_fd = fd;
-                Ok(())
-            }
+            let listener = self.listener.as_ref()
+                .ok_or("not listening")?;
+            let (stream, _addr) = listener.accept()
+                .map_err(|e| format!("accept() failed: {}", e))?;
+            stream.set_nodelay(true).ok();
+            self.stream = Some(stream);
+            self.exchange_pids(true)
         }
 
-        /// Send an fd via SCM_RIGHTS with a data payload.
+        fn exchange_pids(&mut self, is_server: bool) -> Result<(), String> {
+            let my_pid = std::process::id();
+            let stream = self.stream.as_mut().unwrap();
+
+            if is_server {
+                write_all(stream, &my_pid.to_le_bytes())?;
+                let mut buf = [0u8; 4];
+                read_exact(stream, &mut buf)?;
+                self.remote_pid = u32::from_le_bytes(buf);
+            } else {
+                let mut buf = [0u8; 4];
+                read_exact(stream, &mut buf)?;
+                self.remote_pid = u32::from_le_bytes(buf);
+                write_all(stream, &my_pid.to_le_bytes())?;
+            }
+            eprintln!("[transport] PID exchange: local={}, remote={}", my_pid, self.remote_pid);
+            Ok(())
+        }
+
+        /// Send a handle (fd on Linux) + data payload over TCP.
+        /// The receiver uses pidfd_getfd to clone the fd.
         pub fn send_handle(
-            &self,
-            handle: RawFd,
+            &mut self,
+            handle: i32,
             data: &[u8],
         ) -> Result<(), String> {
-            unsafe {
-                let mut iov = libc::iovec {
-                    iov_base: if data.is_empty() {
-                        &0u8 as *const u8 as *mut libc::c_void
-                    } else {
-                        data.as_ptr() as *mut libc::c_void
-                    },
-                    iov_len: if data.is_empty() { 1 } else { data.len() },
-                };
-
-                // Allocate cmsg buffer
-                let cmsg_space = libc::CMSG_SPACE(std::mem::size_of::<libc::c_int>() as u32) as usize;
-                let mut cmsg_buf = vec![0u8; cmsg_space];
-
-                let mut msg: libc::msghdr = std::mem::zeroed();
-                msg.msg_iov = &mut iov;
-                msg.msg_iovlen = 1;
-                msg.msg_control = cmsg_buf.as_mut_ptr() as *mut libc::c_void;
-                msg.msg_controllen = cmsg_space as _;
-
-                let cmsg = libc::CMSG_FIRSTHDR(&msg);
-                (*cmsg).cmsg_level = libc::SOL_SOCKET;
-                (*cmsg).cmsg_type = libc::SCM_RIGHTS;
-                (*cmsg).cmsg_len = libc::CMSG_LEN(std::mem::size_of::<libc::c_int>() as u32) as _;
-
-                std::ptr::copy_nonoverlapping(
-                    &handle as *const RawFd as *const u8,
-                    libc::CMSG_DATA(cmsg),
-                    std::mem::size_of::<libc::c_int>(),
-                );
-
-                let sent = libc::sendmsg(self.conn_fd, &msg, 0);
-                if sent < 0 {
-                    return Err(format!(
-                        "sendmsg() failed: {}",
-                        std::io::Error::last_os_error()
-                    ));
-                }
-                Ok(())
+            let stream = self.stream.as_mut()
+                .ok_or("not connected")?;
+            let handle_val = handle as u64;
+            write_all(stream, &handle_val.to_le_bytes())?;
+            if !data.is_empty() {
+                write_all(stream, data)?;
             }
+            Ok(())
         }
 
-        /// Non-blocking receive of plain data (no fd).
+        /// Non-blocking receive of plain data.
         pub fn recv_data_non_blocking(
             &self,
             buf: &mut [u8],
         ) -> Option<usize> {
-            unsafe {
-                let n = libc::recv(
-                    self.conn_fd,
-                    buf.as_mut_ptr() as *mut libc::c_void,
-                    buf.len(),
-                    libc::MSG_DONTWAIT,
-                );
-                if n <= 0 {
-                    None
-                } else {
-                    Some(n as usize)
-                }
+            let stream = self.stream.as_ref()?;
+            stream.set_nonblocking(true).ok();
+            let result = (&*stream).read(buf);
+            stream.set_nonblocking(false).ok();
+            match result {
+                Ok(0) => None,
+                Ok(n) => Some(n),
+                Err(_) => None,
             }
         }
 
         pub fn close(&mut self) {
-            unsafe {
-                if self.conn_fd >= 0 {
-                    libc::close(self.conn_fd);
-                    self.conn_fd = -1;
-                }
-                if self.listen_fd >= 0 {
-                    libc::close(self.listen_fd);
-                    self.listen_fd = -1;
-                }
-                if !self.endpoint.is_empty() {
-                    let c_path = std::ffi::CString::new(self.endpoint.as_str()).unwrap();
-                    libc::unlink(c_path.as_ptr());
-                    self.endpoint.clear();
-                }
-            }
+            self.stream = None;
+            self.listener = None;
         }
     }
 
-    impl Drop for UnixTransport {
+    impl Drop for TcpTransport {
         fn drop(&mut self) {
             self.close();
         }
@@ -408,16 +348,16 @@ unsafe fn destroy_shared_image(device: &ash::Device, img: &mut SharedImage) {
 fn main() {
     // Parse command line args
     let args: Vec<String> = std::env::args().collect();
-    let mut socket_path = "/tmp/gpu-share.sock".to_string();
+    let mut port = "9710".to_string();
     let mut script_path = String::new();
 
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
-            "--socket" | "-s" => {
+            "--port" | "-p" => {
                 if i + 1 < args.len() {
                     i += 1;
-                    socket_path = args[i].clone();
+                    port = args[i].clone();
                 }
             }
             "--script" => {
@@ -584,14 +524,14 @@ fn main() {
     // -----------------------------------------------------------------------
     // 6. Socket: listen and accept presenter connection
     // -----------------------------------------------------------------------
-    let mut transport = transport::UnixTransport::new();
+    let mut transport = transport::TcpTransport::new();
     transport
-        .listen(&socket_path)
-        .unwrap_or_else(|e| panic!("Failed to listen on {}: {}", socket_path, e));
+        .listen(&port)
+        .unwrap_or_else(|e| panic!("Failed to listen on {}: {}", port, e));
 
     eprintln!(
         "[deno_renderer] Waiting for presenter to connect on {}...",
-        socket_path
+        port
     );
 
     transport

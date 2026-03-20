@@ -5,8 +5,9 @@
 #include <memory>
 
 // Cross-platform transport for passing GPU memory handles between processes.
-// Linux:   Unix domain socket + SCM_RIGHTS fd passing
-// Windows: Named pipe + DuplicateHandle
+// Uses TCP 127.0.0.1:<port> on all platforms. Handle passing:
+// Linux:   pidfd_open + pidfd_getfd (kernel 5.6+)
+// Windows: OpenProcess + DuplicateHandle
 class HandleTransport {
 public:
     virtual ~HandleTransport() = default;

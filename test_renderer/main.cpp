@@ -392,15 +392,11 @@ static void destroySharedImage(VkDevice device, SharedImage& img) {
 // main
 // ---------------------------------------------------------------------------
 int main(int argc, char* argv[]) {
-    // Parse socket path from command line
-#ifdef _WIN32
-    std::string socketPath = "gpu-share";
-#else
-    std::string socketPath = "/tmp/gpu-share.sock";
-#endif
+    // Parse port from command line
+    std::string port = "9710";
     for (int i = 1; i < argc; ++i) {
-        if ((std::string(argv[i]) == "--socket" || std::string(argv[i]) == "-s") && i + 1 < argc) {
-            socketPath = argv[++i];
+        if ((std::string(argv[i]) == "--port" || std::string(argv[i]) == "-p") && i + 1 < argc) {
+            port = argv[++i];
         }
     }
 
@@ -784,12 +780,12 @@ int main(int argc, char* argv[]) {
     // -----------------------------------------------------------------------
     auto transport = HandleTransport::create();
     g_transport = transport.get();
-    if (!transport->listen(socketPath)) {
-        fprintf(stderr, "Failed to listen on %s\n", socketPath.c_str());
+    if (!transport->listen(port)) {
+        fprintf(stderr, "Failed to listen on %s\n", port.c_str());
         return 1;
     }
 
-    fprintf(stderr, "[test_renderer] Waiting for presenter to connect on %s...\n", socketPath.c_str());
+    fprintf(stderr, "[test_renderer] Waiting for presenter to connect on %s...\n", port.c_str());
 
     if (!transport->accept()) {
         fprintf(stderr, "Failed to accept connection\n");

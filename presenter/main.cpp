@@ -59,18 +59,17 @@ struct ChildProcess {
         }
         if (pid == 0) {
             // Child — parse args and exec
-            // Simple: just pass --socket <path> via execlp
-            // args is expected to be "--socket <path>"
-            std::string socketArg;
-            auto pos = args.find("--socket ");
+            // Simple: just pass --port <value> via execlp
+            // args is expected to be "--port <value>"
+            std::string portArg;
+            auto pos = args.find("--port ");
             if (pos != std::string::npos) {
-                socketArg = args.substr(pos + 9);
-                // trim whitespace
-                while (!socketArg.empty() && socketArg.back() == ' ')
-                    socketArg.pop_back();
+                portArg = args.substr(pos + 7);
+                while (!portArg.empty() && portArg.back() == ' ')
+                    portArg.pop_back();
             }
-            if (!socketArg.empty()) {
-                execlp(exe.c_str(), exe.c_str(), "--socket", socketArg.c_str(), nullptr);
+            if (!portArg.empty()) {
+                execlp(exe.c_str(), exe.c_str(), "--port", portArg.c_str(), nullptr);
             } else {
                 execlp(exe.c_str(), exe.c_str(), nullptr);
             }
@@ -152,18 +151,14 @@ static void forwardEvent(HandleTransport* t, const InputEvent& ev) {
 }
 
 int main(int argc, char* argv[]) {
-#ifdef _WIN32
-    const char* socketPath = "gpu-share";
-#else
-    const char* socketPath = "/tmp/gpu-share.sock";
-#endif
+    const char* port = "9710";
     const char* rendererPath = nullptr;
     bool noSpawn = false;
     bool useDeno = false;
 
     for (int i = 1; i < argc; i++) {
-        if ((strcmp(argv[i], "--socket") == 0 || strcmp(argv[i], "-s") == 0) && i + 1 < argc) {
-            socketPath = argv[++i];
+        if ((strcmp(argv[i], "--port") == 0 || strcmp(argv[i], "-p") == 0) && i + 1 < argc) {
+            port = argv[++i];
         } else if (strcmp(argv[i], "--renderer") == 0 && i + 1 < argc) {
             rendererPath = argv[++i];
         } else if (strcmp(argv[i], "--no-spawn") == 0) {
@@ -206,7 +201,7 @@ int main(int argc, char* argv[]) {
     // Launch renderer process (unless --no-spawn)
     ChildProcess renderer;
     if (!noSpawn) {
-        std::string rendererArgs = std::string("--socket ") + socketPath;
+        std::string rendererArgs = std::string("--port ") + port;
         fprintf(stderr, "Launching renderer: %s %s\n",
                 rendererExe.c_str(), rendererArgs.c_str());
         if (!renderer.spawn(rendererExe, rendererArgs)) {
@@ -222,12 +217,12 @@ int main(int argc, char* argv[]) {
 
     // Connect to renderer via transport
     auto transport = HandleTransport::create();
-    fprintf(stderr, "Connecting to renderer at %s...\n", socketPath);
+    fprintf(stderr, "Connecting to renderer at %s...\n", port);
 
     // Retry connection a few times (renderer may still be starting)
     bool connected = false;
     for (int attempt = 0; attempt < 10; attempt++) {
-        if (transport->connect(socketPath)) {
+        if (transport->connect(port)) {
             connected = true;
             break;
         }

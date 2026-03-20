@@ -17,18 +17,12 @@ if(NOT SDL3_FOUND)
     FetchContent_MakeAvailable(SDL3)
 endif()
 
-if(WIN32)
-    set(TRANSPORT_SOURCES ../handle_transport/handle_transport_win32.cpp)
-else()
-    set(TRANSPORT_SOURCES ../handle_transport/handle_transport_unix.cpp)
-endif()
-
 add_executable(presenter
     main.cpp
     vulkan_context.cpp
     surface_import.cpp
     compositor.cpp
-    ${TRANSPORT_SOURCES}
+    ../handle_transport/handle_transport_tcp.cpp
 )
 
 target_include_directories(presenter PRIVATE
@@ -39,6 +33,10 @@ if(TARGET SDL3::SDL3-static)
     target_link_libraries(presenter PRIVATE Vulkan::Vulkan SDL3::SDL3-static)
 else()
     target_link_libraries(presenter PRIVATE Vulkan::Vulkan SDL3::SDL3)
+endif()
+
+if(WIN32)
+    target_link_libraries(presenter PRIVATE ws2_32)
 endif()
 
 target_compile_features(presenter PRIVATE cxx_std_17)
