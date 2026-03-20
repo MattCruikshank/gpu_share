@@ -593,6 +593,17 @@ fn op_gpu_create_render_pipeline(
             .render_pass(render_pass)
             .subpass(0);
 
+        // Dump SPIR-V to files for debugging
+        if let Ok(dir) = std::env::current_exe().map(|p| p.parent().unwrap().to_path_buf()) {
+            let vert_path = dir.join("debug_vert.spv");
+            let frag_path = dir.join("debug_frag.spv");
+            let vert_bytes: Vec<u8> = vert_spirv.iter().flat_map(|w| w.to_le_bytes()).collect();
+            let frag_bytes: Vec<u8> = frag_spirv.iter().flat_map(|w| w.to_le_bytes()).collect();
+            let _ = std::fs::write(&vert_path, &vert_bytes);
+            let _ = std::fs::write(&frag_path, &frag_bytes);
+            eprintln!("[gpu] SPIR-V dumped to {:?} and {:?}", vert_path, frag_path);
+        }
+
         let pipeline = match gpu
             .device
             .create_graphics_pipelines(vk::PipelineCache::null(), &[pipeline_ci], None)
@@ -600,6 +611,7 @@ fn op_gpu_create_render_pipeline(
             Ok(pipelines) => pipelines[0],
             Err((_, err)) => {
                 eprintln!("[gpu] Failed to create graphics pipeline: {:?}", err);
+                eprintln!("[gpu] Vert SPIR-V: {} words, Frag SPIR-V: {} words", vert_spirv.len(), frag_spirv.len());
                 gpu.device.destroy_pipeline_layout(pipeline_layout, None);
                 gpu.device.destroy_render_pass(render_pass, None);
                 return u32::MAX;
@@ -1216,11 +1228,16 @@ fn main() {
         ash::khr::external_memory_capabilities::NAME.as_ptr(),
         ash::khr::external_semaphore_capabilities::NAME.as_ptr(),
         ash::khr::get_physical_device_properties2::NAME.as_ptr(),
+        ash::ext::debug_utils::NAME.as_ptr(),
     ];
+
+    let validation_layer = c"VK_LAYER_KHRONOS_validation";
+    let layers = [validation_layer.as_ptr()];
 
     let instance_ci = vk::InstanceCreateInfo::default()
         .application_info(&app_info)
-        .enabled_extension_names(&instance_extensions);
+        .enabled_extension_names(&instance_extensions)
+        .enabled_layer_names(&layers);
 
     let instance = unsafe {
         entry
