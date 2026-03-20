@@ -1223,15 +1223,20 @@ mod transport {
         pub fn recv_data_non_blocking(&self, buf: &mut [u8]) -> Option<usize> {
             use std::io::ErrorKind;
             let stream = self.stream.as_ref()?;
-            // Set a very short read timeout instead of toggling nonblocking mode
-            stream.set_read_timeout(Some(Duration::from_millis(1))).ok();
-            let result = (&*stream).read(buf);
-            stream.set_read_timeout(None).ok(); // back to blocking
-            match result {
-                Ok(0) => None,
-                Ok(n) => Some(n),
-                Err(ref e) if e.kind() == ErrorKind::WouldBlock || e.kind() == ErrorKind::TimedOut => None,
-                Err(_) => None,
+            // Peek first to check if a full message is available (non-destructive)
+            let mut peek_buf = vec![0u8; buf.len()];
+            stream.set_nonblocking(true).ok();
+            let peeked = (&*stream).peek(&mut peek_buf);
+            stream.set_nonblocking(false).ok();
+            match peeked {
+                Ok(n) if n >= buf.len() => {
+                    // Full message available — blocking read is safe (data is already buffered)
+                    match (&*stream).read_exact(buf) {
+                        Ok(()) => Some(buf.len()),
+                        Err(_) => None,
+                    }
+                }
+                _ => None, // not enough data yet, or error/WouldBlock
             }
         }
 
