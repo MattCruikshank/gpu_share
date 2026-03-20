@@ -95,22 +95,46 @@ struct ChildProcess {
 // ---------------------------------------------------------------------------
 static std::string findRendererExe(const char* presenterArgv0) {
     std::string path(presenterArgv0);
+    auto lastSep = path.find_last_of("/\\");
+
+    // Same directory (Linux single-config build, or manual placement)
+    std::string sameDir;
+    if (lastSep != std::string::npos)
+        sameDir = path.substr(0, lastSep + 1);
 #ifdef _WIN32
-    char sep = '\\';
-    // Also handle forward slashes
-    auto lastSep = path.find_last_of("\\/");
+    std::string candidate = sameDir + "test_renderer.exe";
 #else
-    char sep = '/';
-    auto lastSep = path.find_last_of('/');
+    std::string candidate = sameDir + "test_renderer";
 #endif
-    std::string dir;
+    // Check if it exists there
+    FILE* f = fopen(candidate.c_str(), "rb");
+    if (f) { fclose(f); return candidate; }
+
+    // MSVC multi-config layout: build/presenter/Debug/ → build/test_renderer/Debug/
+    // Go up two levels from the exe directory
     if (lastSep != std::string::npos) {
-        dir = path.substr(0, lastSep + 1);
-    }
+        auto configSep = path.find_last_of("/\\", lastSep - 1);
+        if (configSep != std::string::npos) {
+            std::string configDir = path.substr(configSep, lastSep - configSep + 1);
+            auto parentSep = path.find_last_of("/\\", configSep - 1);
+            if (parentSep != std::string::npos) {
+                std::string buildRoot = path.substr(0, parentSep + 1);
 #ifdef _WIN32
-    return dir + "test_renderer.exe";
+                candidate = buildRoot + "test_renderer" + configDir + "test_renderer.exe";
 #else
-    return dir + "test_renderer";
+                candidate = buildRoot + "test_renderer" + configDir + "test_renderer";
+#endif
+                f = fopen(candidate.c_str(), "rb");
+                if (f) { fclose(f); return candidate; }
+            }
+        }
+    }
+
+    // Fallback: hope it's on PATH
+#ifdef _WIN32
+    return "test_renderer.exe";
+#else
+    return "test_renderer";
 #endif
 }
 
