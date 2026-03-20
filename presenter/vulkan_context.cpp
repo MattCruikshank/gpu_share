@@ -460,17 +460,27 @@ void VulkanContext::recreateSwapchain() {
         commandBuffers_.clear();
     }
 
-    // Destroy and recreate sync objects — old semaphores may still be
-    // held by the presentation engine for the old swapchain
+    // Destroy and recreate semaphores — old semaphores may still be
+    // held by the presentation engine for the old swapchain.
+    // Keep fences alive (they're host-side, vkDeviceWaitIdle is sufficient).
     for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
         if (imageAvailableSemaphores_[i]) vkDestroySemaphore(device_, imageAvailableSemaphores_[i], nullptr);
         if (renderFinishedSemaphores_[i]) vkDestroySemaphore(device_, renderFinishedSemaphores_[i], nullptr);
-        if (inFlightFences_[i]) vkDestroyFence(device_, inFlightFences_[i], nullptr);
+        imageAvailableSemaphores_[i] = VK_NULL_HANDLE;
+        renderFinishedSemaphores_[i] = VK_NULL_HANDLE;
     }
 
     cleanupSwapchain();
     createSwapchain();
-    createSyncObjects();
+
+    // Recreate semaphores, reset imagesInFlight
+    VkSemaphoreCreateInfo semInfo{};
+    semInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
+    for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
+        VK_CHECK(vkCreateSemaphore(device_, &semInfo, nullptr, &imageAvailableSemaphores_[i]));
+        VK_CHECK(vkCreateSemaphore(device_, &semInfo, nullptr, &renderFinishedSemaphores_[i]));
+    }
+    imagesInFlight_.assign(swapchainImages_.size(), VK_NULL_HANDLE);
     currentFrame_ = 0;
 
     // Reallocate command buffers for new swapchain image count
