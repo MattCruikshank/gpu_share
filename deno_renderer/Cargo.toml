@@ -8,9 +8,15 @@ ash = { version = "0.38", features = ["linked"] }
 deno_core = "0.393"
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
+naga = { version = "24", features = ["wgsl-in", "spv-out"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_Console", "Win32_System_Pipes", "Win32_System_Threading", "Win32_Security", "Win32_System_IO", "Win32_Storage_FileSystem"] }
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_System_Console",
+    "Win32_System_Threading",
+    "Win32_Security",
+] }
