@@ -1105,10 +1105,19 @@ mod transport {
         remote_process: *mut std::ffi::c_void,
     }
 
-    fn write_all(stream: &mut TcpStream, data: &[u8]) -> Result<(), String> {
-        stream
-            .write_all(data)
-            .map_err(|e| format!("write failed: {}", e))
+    fn write_all_nb(stream: &mut TcpStream, data: &[u8]) -> Result<(), String> {
+        let mut pos = 0;
+        while pos < data.len() {
+            match stream.write(&data[pos..]) {
+                Ok(n) => pos += n,
+                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::yield_now();
+                    continue;
+                }
+                Err(e) => return Err(format!("write failed: {}", e)),
+            }
+        }
+        Ok(())
     }
 
     fn read_exact(stream: &mut TcpStream, buf: &mut [u8]) -> Result<(), String> {
@@ -1151,7 +1160,7 @@ mod transport {
             let stream = self.stream.as_mut().unwrap();
 
             if is_server {
-                write_all(stream, &my_pid.to_le_bytes())?;
+                write_all_nb(stream, &my_pid.to_le_bytes())?;
                 let mut buf = [0u8; 4];
                 read_exact(stream, &mut buf)?;
                 self.remote_pid = u32::from_le_bytes(buf);
@@ -1159,7 +1168,7 @@ mod transport {
                 let mut buf = [0u8; 4];
                 read_exact(stream, &mut buf)?;
                 self.remote_pid = u32::from_le_bytes(buf);
-                write_all(stream, &my_pid.to_le_bytes())?;
+                write_all_nb(stream, &my_pid.to_le_bytes())?;
             }
             eprintln!(
                 "[transport] PID exchange: local={}, remote={}",
@@ -1176,6 +1185,10 @@ mod transport {
                     return Err(format!("OpenProcess({}) failed", self.remote_pid));
                 }
             }
+
+            // Set stream to nonblocking permanently — recv_data_non_blocking
+            // just tries read(), sends loop on WouldBlock.
+            self.stream.as_ref().unwrap().set_nonblocking(true).ok();
 
             Ok(())
         }
@@ -1212,29 +1225,30 @@ mod transport {
                 remote_handle as u64
             };
 
-            write_all(stream, &handle_val.to_le_bytes())?;
+            write_all_nb(stream, &handle_val.to_le_bytes())?;
             if !data.is_empty() {
-                write_all(stream, data)?;
+                write_all_nb(stream, data)?;
             }
             Ok(())
         }
 
         pub fn recv_data_non_blocking(&self, buf: &mut [u8]) -> Option<usize> {
             let stream = self.stream.as_ref()?;
-            // Peek first to check if a full message is available (non-destructive)
+            // Stream is permanently nonblocking. Peek to check if full message available.
             let mut peek_buf = vec![0u8; buf.len()];
-            stream.set_nonblocking(true).ok();
-            let peeked = (&*stream).peek(&mut peek_buf);
-            stream.set_nonblocking(false).ok();
-            match peeked {
+            match (&*stream).peek(&mut peek_buf) {
                 Ok(n) if n >= buf.len() => {
-                    // Full message available — blocking read is safe (data is already buffered)
-                    match (&*stream).read_exact(buf) {
+                    // Full message available — read_exact will succeed immediately
+                    // (temporarily set blocking for the read_exact to avoid partial reads)
+                    stream.set_nonblocking(false).ok();
+                    let result = (&*stream).read_exact(buf);
+                    stream.set_nonblocking(true).ok();
+                    match result {
                         Ok(()) => Some(buf.len()),
                         Err(_) => None,
                     }
                 }
-                _ => None, // not enough data yet, or error/WouldBlock
+                _ => None, // WouldBlock, not enough data, or error
             }
         }
 
