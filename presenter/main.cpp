@@ -184,15 +184,29 @@ static void teardownTab(Tab& tab, VkDevice device) {
 }
 
 // ---------------------------------------------------------------------------
-// Resolve a scene script path relative to the renderer executable
+// Resolve a scene script path. Checks multiple locations:
+//   1. deno_renderer/<scriptName> (source tree, if running from repo root)
+//   2. <renderer exe dir>/<scriptName> (next to the binary)
+//   3. <scriptName> as-is (relative to CWD)
 // ---------------------------------------------------------------------------
 static std::string resolveScriptPath(const std::string& rendererExe,
                                      const std::string& scriptName) {
-    // Find the directory containing the renderer executable
+    // Source tree (e.g. deno_renderer/scenes/1.ts from repo root)
+    std::string candidate = "deno_renderer/" + scriptName;
+    if (fileExists(candidate)) return candidate;
+#ifdef _WIN32
+    candidate = "deno_renderer\\" + scriptName;
+    if (fileExists(candidate)) return candidate;
+#endif
+
+    // Next to renderer executable
     auto lastSep = rendererExe.find_last_of("/\\");
     if (lastSep != std::string::npos) {
-        return rendererExe.substr(0, lastSep + 1) + scriptName;
+        candidate = rendererExe.substr(0, lastSep + 1) + scriptName;
+        if (fileExists(candidate)) return candidate;
     }
+
+    // Fallback: as-is
     return scriptName;
 }
 
