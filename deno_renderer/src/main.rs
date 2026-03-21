@@ -1461,15 +1461,32 @@ fn main() {
 
             runtime.op_state().borrow_mut().put(gpu_clone);
 
-            // Load protobuf runtime bundle (exposes globalThis.proto)
+            // Load V8 polyfills (TextEncoder/TextDecoder) then protobuf bundle
             {
-                let proto_bundle_path = if let Ok(exe) = std::env::current_exe() {
-                    exe.parent()
-                        .map(|d| d.join("proto_bundle.js").to_string_lossy().to_string())
-                        .unwrap_or_else(|| "proto_bundle.js".to_string())
-                } else {
-                    "proto_bundle.js".to_string()
+                let exe_dir = std::env::current_exe()
+                    .ok()
+                    .and_then(|p| p.parent().map(|d| d.to_path_buf()));
+                let resolve = |name: &str| -> String {
+                    exe_dir
+                        .as_ref()
+                        .map(|d| d.join(name).to_string_lossy().to_string())
+                        .unwrap_or_else(|| name.to_string())
                 };
+
+                // Polyfill must run before proto_bundle.js (protobuf-es needs TextEncoder)
+                let polyfill_path = resolve("v8_polyfill.js");
+                match std::fs::read_to_string(&polyfill_path) {
+                    Ok(code) => {
+                        if let Err(e) = runtime.execute_script("<v8_polyfill>", code) {
+                            eprintln!("[deno_renderer] Failed to load v8 polyfill: {}", e);
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("[deno_renderer] Warning: could not load '{}': {}", polyfill_path, e);
+                    }
+                }
+
+                let proto_bundle_path = resolve("proto_bundle.js");
                 match std::fs::read_to_string(&proto_bundle_path) {
                     Ok(code) => {
                         if let Err(e) = runtime.execute_script("<proto_bundle>", code) {
