@@ -1,17 +1,68 @@
 # Generate C++ code from gpu_share.proto (protobuf + gRPC)
-# Uses system-installed protobuf + gRPC packages.
-
-find_package(PkgConfig REQUIRED)
-pkg_check_modules(PROTOBUF REQUIRED IMPORTED_TARGET protobuf)
-pkg_check_modules(GRPC REQUIRED IMPORTED_TARGET grpc++)
-
-find_program(PROTOC protoc REQUIRED)
-find_program(GRPC_CPP_PLUGIN grpc_cpp_plugin REQUIRED)
+#
+# Discovery order:
+#   1. CMake CONFIG packages (vcpkg, system CMake configs)
+#   2. pkg-config (Linux system packages)
+#   3. FetchContent (download and build from source)
 
 set(PROTO_SRC "${CMAKE_CURRENT_SOURCE_DIR}/gpu_share.proto")
 set(PROTO_OUT "${CMAKE_CURRENT_BINARY_DIR}")
 
-# Generated file paths
+# --- Find gRPC + protobuf ---
+
+# Try CMake CONFIG mode first (works with vcpkg and gRPC's own CMake install)
+find_package(gRPC CONFIG QUIET)
+find_package(protobuf CONFIG QUIET)
+
+if(gRPC_FOUND AND protobuf_FOUND)
+    message(STATUS "Found gRPC and protobuf via CMake CONFIG")
+    set(_PROTOC $<TARGET_FILE:protobuf::protoc>)
+    set(_GRPC_CPP_PLUGIN $<TARGET_FILE:gRPC::grpc_cpp_plugin>)
+    set(_GRPC_LIBS gRPC::grpc++ protobuf::libprotobuf)
+else()
+    # Try pkg-config (Linux system packages)
+    find_package(PkgConfig QUIET)
+    if(PkgConfig_FOUND)
+        pkg_check_modules(PROTOBUF QUIET IMPORTED_TARGET protobuf)
+        pkg_check_modules(GRPC QUIET IMPORTED_TARGET grpc++)
+    endif()
+
+    if(PROTOBUF_FOUND AND GRPC_FOUND)
+        message(STATUS "Found gRPC and protobuf via pkg-config")
+        find_program(_PROTOC protoc REQUIRED)
+        find_program(_GRPC_CPP_PLUGIN grpc_cpp_plugin REQUIRED)
+        set(_GRPC_LIBS PkgConfig::GRPC PkgConfig::PROTOBUF)
+    else()
+        # FetchContent as last resort
+        message(STATUS "gRPC not found locally — fetching from source (this will take a while)")
+        include(FetchContent)
+
+        set(FETCHCONTENT_QUIET OFF)
+        set(gRPC_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+        set(gRPC_BUILD_CSHARP_EXT OFF CACHE BOOL "" FORCE)
+        set(gRPC_BUILD_GRPC_CSHARP_PLUGIN OFF CACHE BOOL "" FORCE)
+        set(gRPC_BUILD_GRPC_NODE_PLUGIN OFF CACHE BOOL "" FORCE)
+        set(gRPC_BUILD_GRPC_OBJECTIVE_C_PLUGIN OFF CACHE BOOL "" FORCE)
+        set(gRPC_BUILD_GRPC_PHP_PLUGIN OFF CACHE BOOL "" FORCE)
+        set(gRPC_BUILD_GRPC_PYTHON_PLUGIN OFF CACHE BOOL "" FORCE)
+        set(gRPC_BUILD_GRPC_RUBY_PLUGIN OFF CACHE BOOL "" FORCE)
+
+        FetchContent_Declare(
+            grpc
+            GIT_REPOSITORY https://github.com/grpc/grpc.git
+            GIT_TAG        v1.70.0
+            GIT_SHALLOW    TRUE
+        )
+        FetchContent_MakeAvailable(grpc)
+
+        set(_PROTOC $<TARGET_FILE:protoc>)
+        set(_GRPC_CPP_PLUGIN $<TARGET_FILE:grpc_cpp_plugin>)
+        set(_GRPC_LIBS grpc++ protobuf::libprotobuf)
+    endif()
+endif()
+
+# --- Generate C++ code ---
+
 set(PROTO_GENERATED_SRCS
     "${PROTO_OUT}/gpu_share.pb.cc"
     "${PROTO_OUT}/gpu_share.grpc.pb.cc"
@@ -23,11 +74,11 @@ set(PROTO_GENERATED_HDRS
 
 add_custom_command(
     OUTPUT ${PROTO_GENERATED_SRCS} ${PROTO_GENERATED_HDRS}
-    COMMAND ${PROTOC}
+    COMMAND ${_PROTOC}
         --proto_path="${CMAKE_CURRENT_SOURCE_DIR}"
         --cpp_out="${PROTO_OUT}"
         --grpc_out="${PROTO_OUT}"
-        --plugin=protoc-gen-grpc=${GRPC_CPP_PLUGIN}
+        --plugin=protoc-gen-grpc=${_GRPC_CPP_PLUGIN}
         "${PROTO_SRC}"
     DEPENDS "${PROTO_SRC}"
     COMMENT "Generating C++ protobuf/gRPC code from gpu_share.proto"
@@ -37,7 +88,4 @@ add_library(gpu_share_proto STATIC ${PROTO_GENERATED_SRCS} ${PROTO_GENERATED_HDR
 
 target_include_directories(gpu_share_proto PUBLIC "${PROTO_OUT}")
 
-target_link_libraries(gpu_share_proto PUBLIC
-    PkgConfig::GRPC
-    PkgConfig::PROTOBUF
-)
+target_link_libraries(gpu_share_proto PUBLIC ${_GRPC_LIBS})
