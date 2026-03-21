@@ -164,6 +164,26 @@ static std::string findExe(const char* presenterArgv0, const std::string& name) 
 }
 
 // ---------------------------------------------------------------------------
+// Tear down a tab's renderer (for hot-reload or cleanup)
+// ---------------------------------------------------------------------------
+static void teardownTab(Tab& tab, VkDevice device) {
+    if (tab.hasImportedSurface) {
+        vkDeviceWaitIdle(device);
+        tab.imported.destroy(device);
+        tab.hasImportedSurface = false;
+    }
+    if (tab.bridge) {
+        tab.bridge->stop();
+        tab.bridge.reset();
+    }
+    if (tab.spawned) {
+        tab.process.terminate();
+    }
+    tab.spawned = false;
+    tab.connected = false;
+}
+
+// ---------------------------------------------------------------------------
 // Resolve a scene script path relative to the renderer executable
 // ---------------------------------------------------------------------------
 static std::string resolveScriptPath(const std::string& rendererExe,
@@ -267,7 +287,7 @@ int main(int argc, char* argv[]) {
 
     Compositor compositor;
 
-    fprintf(stderr, "Presenter ready. Press 1-%d to launch/switch tabs. ESC to quit.\n", MAX_TABS);
+    fprintf(stderr, "Presenter ready. 1-%d=tabs, R=reload, ESC=quit\n", MAX_TABS);
 
     // Main loop
     bool running = true;
@@ -318,16 +338,33 @@ int main(int argc, char* argv[]) {
                     std::string title = "GPU Share - Tab " + std::to_string(activeTab + 1);
                     SDL_SetWindowTitle(window, title.c_str());
                 }
+
+                // R key: hot-reload active tab
+                if (key == SDLK_R && activeTab >= 0 && tabs[activeTab].spawned) {
+                    fprintf(stderr, "[tab %d] Hot-reloading...\n", activeTab + 1);
+                    teardownTab(tabs[activeTab], vkCtx.getDevice());
+                    if (spawnTab(tabs[activeTab], rendererExe,
+                                 vkCtx.getDevice(), vkCtx.getPhysicalDevice())) {
+                        tabs[activeTab].bridge->pushTabResume();
+                        fprintf(stderr, "[tab %d] Reloaded\n", activeTab + 1);
+                    } else {
+                        fprintf(stderr, "[tab %d] Reload failed\n", activeTab + 1);
+                        activeTab = -1;
+                        SDL_SetWindowTitle(window, "GPU Share - Presenter");
+                    }
+                }
             }
 
             if (event.type == SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED) {
                 vkCtx.notifyResized();
-                // Tell active renderer to resize
-                if (activeTab >= 0 && tabs[activeTab].hasImportedSurface) {
-                    int pw, ph;
-                    SDL_GetWindowSizeInPixels(window, &pw, &ph);
-                    tabs[activeTab].bridge->pushResize(
-                        static_cast<uint32_t>(pw), static_cast<uint32_t>(ph));
+                // Tell ALL connected renderers to resize (not just active)
+                int pw, ph;
+                SDL_GetWindowSizeInPixels(window, &pw, &ph);
+                for (int i = 0; i < MAX_TABS; i++) {
+                    if (tabs[i].connected && tabs[i].hasImportedSurface) {
+                        tabs[i].bridge->pushResize(
+                            static_cast<uint32_t>(pw), static_cast<uint32_t>(ph));
+                    }
                 }
             }
 
@@ -405,14 +442,8 @@ int main(int argc, char* argv[]) {
     }
 
     // Cleanup
-    vkDeviceWaitIdle(vkCtx.getDevice());
-
     for (int i = 0; i < MAX_TABS; i++) {
-        if (tabs[i].hasImportedSurface) {
-            tabs[i].imported.destroy(vkCtx.getDevice());
-        }
-        if (tabs[i].bridge) tabs[i].bridge->stop();
-        if (tabs[i].spawned) tabs[i].process.terminate();
+        teardownTab(tabs[i], vkCtx.getDevice());
     }
 
     vkCtx.destroy();
