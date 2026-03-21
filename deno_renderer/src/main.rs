@@ -1506,8 +1506,26 @@ fn main() {
                 }
             }
 
-            // Run initial script
-            match std::fs::read_to_string(&script_path) {
+            // Load script — from URL if it starts with http(s)://, otherwise from file
+            let script_result = if script_path.starts_with("http://")
+                || script_path.starts_with("https://")
+            {
+                eprintln!("[deno_renderer] Fetching script: {}", script_path);
+                match reqwest::get(&script_path).await {
+                    Ok(resp) => {
+                        if resp.status().is_success() {
+                            resp.text().await.map_err(|e| format!("{}", e))
+                        } else {
+                            Err(format!("HTTP {}", resp.status()))
+                        }
+                    }
+                    Err(e) => Err(format!("{}", e)),
+                }
+            } else {
+                std::fs::read_to_string(&script_path).map_err(|e| format!("{}", e))
+            };
+
+            match script_result {
                 Ok(code) => {
                     eprintln!("[deno_renderer] Running script: {}", script_path);
                     if let Err(e) = runtime.execute_script("<scene>", code) {
@@ -1519,10 +1537,9 @@ fn main() {
                 }
                 Err(e) => {
                     eprintln!(
-                        "[deno_renderer] Warning: could not load script '{}': {}",
+                        "[deno_renderer] Error loading script '{}': {}",
                         script_path, e
                     );
-                    eprintln!("[deno_renderer] Using default clear color (dark gray)");
                 }
             }
 

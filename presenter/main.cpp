@@ -10,6 +10,8 @@
 #include <string>
 #include <vector>
 #include <memory>
+#include <fstream>
+#include <map>
 #include <thread>
 
 #ifdef _WIN32
@@ -222,8 +224,13 @@ static bool spawnTab(Tab& tab, const std::string& rendererExe, VkDevice device,
         return false;
     }
 
-    // Resolve script path relative to the renderer executable
-    std::string scriptPath = resolveScriptPath(rendererExe, tab.scriptName);
+    // URLs pass through directly; local paths get resolved
+    std::string scriptPath;
+    if (tab.scriptName.find("://") != std::string::npos) {
+        scriptPath = tab.scriptName;  // URL — pass as-is
+    } else {
+        scriptPath = resolveScriptPath(rendererExe, tab.scriptName);
+    }
 
     // Spawn renderer
     std::vector<std::string> args = {
@@ -258,16 +265,65 @@ static bool spawnTab(Tab& tab, const std::string& rendererExe, VkDevice device,
     return true;
 }
 
+// ---------------------------------------------------------------------------
+// Load scenes.json → map of tab number ("1".."9") to script URL/path
+// ---------------------------------------------------------------------------
+static std::map<int, std::string> loadScenesJson(const std::string& path) {
+    std::map<int, std::string> scenes;
+    std::ifstream f(path);
+    if (!f.is_open()) {
+        fprintf(stderr, "Warning: could not open %s\n", path.c_str());
+        return scenes;
+    }
+    // Minimal JSON parsing for { "1": "...", "2": "..." } format
+    std::string content((std::istreambuf_iterator<char>(f)),
+                         std::istreambuf_iterator<char>());
+    // Find each "N": "value" pair
+    size_t pos = 0;
+    while (pos < content.size()) {
+        // Find key
+        auto kStart = content.find('"', pos);
+        if (kStart == std::string::npos) break;
+        auto kEnd = content.find('"', kStart + 1);
+        if (kEnd == std::string::npos) break;
+        std::string key = content.substr(kStart + 1, kEnd - kStart - 1);
+
+        // Find value
+        auto vStart = content.find('"', kEnd + 1);
+        if (vStart == std::string::npos) break;
+        auto vEnd = content.find('"', vStart + 1);
+        if (vEnd == std::string::npos) break;
+        std::string value = content.substr(vStart + 1, vEnd - vStart - 1);
+
+        int tabNum = std::atoi(key.c_str());
+        if (tabNum >= 1 && tabNum <= 9) {
+            scenes[tabNum - 1] = value;  // 0-based
+        }
+        pos = vEnd + 1;
+    }
+    return scenes;
+}
+
 int main(int argc, char* argv[]) {
     uint16_t basePort = BASE_PORT;
+    std::string scenesJsonPath = "scenes.json";
 
     for (int i = 1; i < argc; i++) {
         if ((strcmp(argv[i], "--port") == 0 || strcmp(argv[i], "-p") == 0) && i + 1 < argc) {
             basePort = static_cast<uint16_t>(std::stoi(argv[++i]));
+        } else if (strcmp(argv[i], "--scenes") == 0 && i + 1 < argc) {
+            scenesJsonPath = argv[++i];
         }
     }
 
     std::string rendererExe = findExe(argv[0], "deno_renderer");
+
+    // Load scene mappings from scenes.json
+    auto sceneMap = loadScenesJson(scenesJsonPath);
+    if (!sceneMap.empty()) {
+        fprintf(stderr, "Loaded %zu scene(s) from %s\n",
+                sceneMap.size(), scenesJsonPath.c_str());
+    }
 
     if (!SDL_Init(SDL_INIT_VIDEO)) {
         fprintf(stderr, "SDL_Init failed: %s\n", SDL_GetError());
@@ -290,11 +346,16 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    // Tab state
+    // Tab state — use scenes.json URLs if available, fall back to local paths
     Tab tabs[MAX_TABS];
     for (int i = 0; i < MAX_TABS; i++) {
         tabs[i].index = i;
-        tabs[i].scriptName = "scenes/" + std::to_string(i + 1) + ".ts";
+        auto it = sceneMap.find(i);
+        if (it != sceneMap.end()) {
+            tabs[i].scriptName = it->second;
+        } else {
+            tabs[i].scriptName = "scenes/" + std::to_string(i + 1) + ".ts";
+        }
         tabs[i].port = basePort + static_cast<uint16_t>(i);
     }
     int activeTab = -1;  // -1 = no active tab
