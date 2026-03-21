@@ -32,6 +32,22 @@ if(CARGO_EXE)
 
     # deno_renderer's build.rs needs protoc for tonic codegen
     find_program(PROTOC_EXE protoc)
+    find_program(NPM_EXE npm)
+
+    # Regenerate TypeScript protobuf types + bundle when the proto file changes
+    if(NPM_EXE)
+        set(PROTO_BUNDLE "${CMAKE_SOURCE_DIR}/deno_renderer/proto_bundle.js")
+        add_custom_command(
+            OUTPUT "${PROTO_BUNDLE}"
+            COMMAND ${NPM_EXE} run proto
+            WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}/deno_renderer"
+            DEPENDS "${CMAKE_SOURCE_DIR}/proto/gpu_share.proto"
+            COMMENT "Regenerating TypeScript protobuf types (npm run proto)"
+        )
+        add_custom_target(deno_proto_bundle DEPENDS "${PROTO_BUNDLE}")
+    else()
+        message(STATUS "npm not found — TypeScript protobuf bundle will not auto-regenerate")
+    endif()
 
     add_custom_target(deno_renderer ALL
         COMMAND ${CMAKE_COMMAND} -E env "PROTOC=${PROTOC_EXE}"
@@ -40,6 +56,9 @@ if(CARGO_EXE)
         COMMENT "Building deno_renderer (Rust/cargo)"
         BYPRODUCTS ${DENO_RENDERER_EXE}
     )
+    if(TARGET deno_proto_bundle)
+        add_dependencies(deno_renderer deno_proto_bundle)
+    endif()
 
     # Copy scene.ts and proto_bundle.js next to the binary so it can find them
     add_custom_command(TARGET deno_renderer POST_BUILD
