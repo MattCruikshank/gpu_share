@@ -76,17 +76,33 @@ Presenter (C++, SDL3 + Vulkan, gRPC server)
 
 ## Build
 
-Requires: Vulkan SDK, CMake 3.25+, C++17 compiler, libgrpc++-dev, protobuf-compiler-grpc. Rust toolchain + protoc for deno_renderer.
+Requires: Vulkan SDK, CMake 3.25+, C++17 compiler, gRPC + protobuf. Rust toolchain + protoc for deno_renderer. Node.js + npm for TypeScript protobuf bundle.
 
+### Linux
 ```bash
-# Everything (C++ + Rust if cargo is on PATH)
+sudo apt install libgrpc++-dev protobuf-compiler-grpc
 cmake -B build
-cmake --build build --config Debug
+cmake --build build
+```
 
-# Run with C++ triangle renderer (default)
+### Windows (vcpkg recommended)
+```powershell
+# Install gRPC via vcpkg (one-time)
+vcpkg install grpc:x64-windows protobuf:x64-windows
+
+# Build with vcpkg toolchain
+cmake -B build -DCMAKE_TOOLCHAIN_FILE="[vcpkg root]/scripts/buildsystems/vcpkg.cmake"
+cmake --build build --config Debug
+```
+
+If vcpkg is not available, CMake falls back to FetchContent (builds gRPC from source, slow first build).
+
+### Run
+```bash
+# C++ triangle renderer (default)
 build/presenter/Debug/presenter.exe
 
-# Run with Rust/TypeScript renderer
+# Rust/TypeScript renderer
 build/presenter/Debug/presenter.exe --deno
 ```
 

@@ -4,6 +4,11 @@ project(gpu-share LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+# Prevent windows.h min/max macros from breaking gRPC and STL headers
+if(WIN32)
+    add_compile_definitions(NOMINMAX WIN32_LEAN_AND_MEAN)
+endif()
+
 add_subdirectory(proto)
 add_subdirectory(presenter)
 add_subdirectory(test_renderer)

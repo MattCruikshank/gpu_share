@@ -42,5 +42,5 @@ endif()
 target_compile_features(presenter PRIVATE cxx_std_17)
 
 if(WIN32)
-    target_compile_definitions(presenter PRIVATE VK_USE_PLATFORM_WIN32_KHR NOMINMAX)
+    target_compile_definitions(presenter PRIVATE VK_USE_PLATFORM_WIN32_KHR)
 endif()
