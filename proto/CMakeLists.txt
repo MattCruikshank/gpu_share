@@ -98,3 +98,6 @@ add_library(gpu_share_proto STATIC ${PROTO_GENERATED_SRCS} ${PROTO_GENERATED_HDR
 target_include_directories(gpu_share_proto PUBLIC "${PROTO_OUT}")
 
 target_link_libraries(gpu_share_proto PUBLIC ${_GRPC_LIBS})
+
+# Export protoc path for use by deno_renderer's cargo build
+set(GPU_SHARE_PROTOC "${_PROTOC}" PARENT_SCOPE)
