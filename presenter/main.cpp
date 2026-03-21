@@ -47,6 +47,13 @@ struct ChildProcess {
         return true;
     }
 
+    bool isAlive() const {
+        if (!valid) return false;
+        DWORD exitCode = 0;
+        if (!GetExitCodeProcess(pi.hProcess, &exitCode)) return false;
+        return exitCode == STILL_ACTIVE;
+    }
+
     void terminate() {
         if (!valid) return;
         TerminateProcess(pi.hProcess, 0);
@@ -72,6 +79,13 @@ struct ChildProcess {
             _exit(1);
         }
         return true;
+    }
+
+    bool isAlive() const {
+        if (pid <= 0) return false;
+        int status = 0;
+        pid_t result = waitpid(pid, &status, WNOHANG);
+        return result == 0;  // 0 = still running
     }
 
     void terminate() {
@@ -177,11 +191,33 @@ static void teardownTab(Tab& tab, VkDevice device) {
         tab.bridge->stop();
         tab.bridge.reset();
     }
-    if (tab.spawned) {
+    if (tab.spawned && tab.process.isAlive()) {
         tab.process.terminate();
     }
     tab.spawned = false;
     tab.connected = false;
+}
+
+// Check if a tab's renderer process has crashed and clean up if so.
+// Returns true if the tab was alive and is now detected as crashed.
+static bool checkTabCrash(Tab& tab, VkDevice device) {
+    if (!tab.spawned || !tab.connected) return false;
+    if (tab.process.isAlive()) return false;
+
+    fprintf(stderr, "[tab %d] Renderer process died — cleaning up\n", tab.index + 1);
+
+    if (tab.hasImportedSurface) {
+        vkDeviceWaitIdle(device);
+        tab.imported.destroy(device);
+        tab.hasImportedSurface = false;
+    }
+    if (tab.bridge) {
+        tab.bridge->stop();
+        tab.bridge.reset();
+    }
+    tab.spawned = false;
+    tab.connected = false;
+    return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -384,7 +420,8 @@ int main(int argc, char* argv[]) {
                 if (key >= SDLK_1 && key <= SDLK_9) {
                     tabNum = key - SDLK_1;  // 0-based
                 }
-                if (tabNum >= 0 && tabNum < MAX_TABS && tabNum != activeTab) {
+                if (tabNum >= 0 && tabNum < MAX_TABS &&
+                    (tabNum != activeTab || !tabs[tabNum].connected)) {
                     // Pause the old active tab
                     if (activeTab >= 0 && tabs[activeTab].connected) {
                         tabs[activeTab].bridge->pushTabPause();
@@ -413,8 +450,8 @@ int main(int argc, char* argv[]) {
                     SDL_SetWindowTitle(window, title.c_str());
                 }
 
-                // R key: hot-reload active tab
-                if (key == SDLK_R && activeTab >= 0 && tabs[activeTab].spawned) {
+                // R key: hot-reload active tab (also works after crash)
+                if (key == SDLK_R && activeTab >= 0) {
                     fprintf(stderr, "[tab %d] Hot-reloading...\n", activeTab + 1);
                     teardownTab(tabs[activeTab], vkCtx.getDevice());
                     if (spawnTab(tabs[activeTab], rendererExe,
@@ -470,8 +507,15 @@ int main(int argc, char* argv[]) {
             }
         }
 
-        // Poll all connected tabs for surface updates (resize responses)
+        // Check for crashed renderers and poll surface updates
         for (int i = 0; i < MAX_TABS; i++) {
+            if (tabs[i].spawned && checkTabCrash(tabs[i], vkCtx.getDevice())) {
+                if (i == activeTab) {
+                    fprintf(stderr, "[tab %d] Active tab crashed — press %d to relaunch or R to reload\n",
+                            i + 1, i + 1);
+                }
+                continue;
+            }
             if (!tabs[i].connected) continue;
             SharedMemoryHandle newHandle = kInvalidMemoryHandle;
             SharedSurfaceInfo newInfo{};
