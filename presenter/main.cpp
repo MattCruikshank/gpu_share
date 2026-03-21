@@ -164,6 +164,19 @@ static std::string findExe(const char* presenterArgv0, const std::string& name) 
 }
 
 // ---------------------------------------------------------------------------
+// Resolve a scene script path relative to the renderer executable
+// ---------------------------------------------------------------------------
+static std::string resolveScriptPath(const std::string& rendererExe,
+                                     const std::string& scriptName) {
+    // Find the directory containing the renderer executable
+    auto lastSep = rendererExe.find_last_of("/\\");
+    if (lastSep != std::string::npos) {
+        return rendererExe.substr(0, lastSep + 1) + scriptName;
+    }
+    return scriptName;
+}
+
+// ---------------------------------------------------------------------------
 // Spawn and connect a tab's renderer
 // ---------------------------------------------------------------------------
 static bool spawnTab(Tab& tab, const std::string& rendererExe, VkDevice device,
@@ -175,10 +188,13 @@ static bool spawnTab(Tab& tab, const std::string& rendererExe, VkDevice device,
         return false;
     }
 
+    // Resolve script path relative to the renderer executable
+    std::string scriptPath = resolveScriptPath(rendererExe, tab.scriptName);
+
     // Spawn renderer
     std::vector<std::string> args = {
         "--port", std::to_string(tab.port),
-        "--script", tab.scriptName
+        "--script", scriptPath
     };
     fprintf(stderr, "[tab %d] Launching: %s --port %u --script %s\n",
             tab.index + 1, rendererExe.c_str(), tab.port, tab.scriptName.c_str());
