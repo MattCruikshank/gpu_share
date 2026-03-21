@@ -1481,6 +1481,8 @@ fn main() {
                     Ok(code) => {
                         if let Err(e) = runtime.execute_script("<v8_polyfill>", code) {
                             eprintln!("[deno_renderer] Failed to load v8 polyfill: {}", e);
+                        } else {
+                            eprintln!("[deno_renderer] Loaded v8_polyfill.js");
                         }
                     }
                     Err(e) => {
