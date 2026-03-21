@@ -47,10 +47,17 @@ else()
         set(gRPC_BUILD_GRPC_PYTHON_PLUGIN OFF CACHE BOOL "" FORCE)
         set(gRPC_BUILD_GRPC_RUBY_PLUGIN OFF CACHE BOOL "" FORCE)
 
+        # CMake 4.x rejects cmake_minimum_required < 3.5 in bundled deps.
+        # This policy override lets older third-party CMakeLists.txt configure.
+        if(CMAKE_VERSION VERSION_GREATER_EQUAL "3.27")
+            cmake_policy(SET CMP0148 OLD)
+        endif()
+        set(CMAKE_POLICY_VERSION_MINIMUM 3.5 CACHE STRING "" FORCE)
+
         FetchContent_Declare(
             grpc
             GIT_REPOSITORY https://github.com/grpc/grpc.git
-            GIT_TAG        v1.70.0
+            GIT_TAG        v1.78.1
             GIT_SHALLOW    TRUE
         )
         FetchContent_MakeAvailable(grpc)
