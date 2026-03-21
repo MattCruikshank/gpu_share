@@ -34,19 +34,38 @@ if(CARGO_EXE)
     find_program(PROTOC_EXE protoc)
     find_program(NPM_EXE npm)
 
-    # Regenerate TypeScript protobuf types + bundle when the proto file changes
-    if(NPM_EXE)
+    # Regenerate TypeScript protobuf types + bundle when the proto file changes.
+    # Runs protoc-gen-es and esbuild directly (avoids npm run needing protoc on PATH).
+    find_program(PROTOC_GEN_ES protoc-gen-es
+        PATHS "${CMAKE_SOURCE_DIR}/deno_renderer/node_modules/.bin"
+        NO_DEFAULT_PATH)
+    find_program(ESBUILD esbuild
+        PATHS "${CMAKE_SOURCE_DIR}/deno_renderer/node_modules/.bin"
+        NO_DEFAULT_PATH)
+
+    if(PROTOC_EXE AND PROTOC_GEN_ES AND ESBUILD)
         set(PROTO_BUNDLE "${CMAKE_SOURCE_DIR}/deno_renderer/proto_bundle.js")
+        set(DENO_GEN_DIR "${CMAKE_SOURCE_DIR}/deno_renderer/gen")
         add_custom_command(
             OUTPUT "${PROTO_BUNDLE}"
-            COMMAND ${NPM_EXE} run proto
+            # Step 1: generate TypeScript types
+            COMMAND ${PROTOC_EXE}
+                --proto_path="${CMAKE_SOURCE_DIR}/proto"
+                "--es_out=${DENO_GEN_DIR}"
+                "--plugin=protoc-gen-es=${PROTOC_GEN_ES}"
+                "${CMAKE_SOURCE_DIR}/proto/gpu_share.proto"
+            # Step 2: bundle into single IIFE
+            COMMAND ${ESBUILD}
+                "${CMAKE_SOURCE_DIR}/deno_renderer/proto_entry.js"
+                --bundle --format=iife --outfile=${PROTO_BUNDLE}
+                --platform=neutral --target=es2020
             WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}/deno_renderer"
             DEPENDS "${CMAKE_SOURCE_DIR}/proto/gpu_share.proto"
-            COMMENT "Regenerating TypeScript protobuf types (npm run proto)"
+            COMMENT "Regenerating TypeScript protobuf types + bundle"
         )
         add_custom_target(deno_proto_bundle DEPENDS "${PROTO_BUNDLE}")
     else()
-        message(STATUS "npm not found — TypeScript protobuf bundle will not auto-regenerate")
+        message(STATUS "protoc/protoc-gen-es/esbuild not all found — run 'cd deno_renderer && npm install && npm run proto' manually")
     endif()
 
     add_custom_target(deno_renderer ALL

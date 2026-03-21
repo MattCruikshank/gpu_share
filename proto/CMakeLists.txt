@@ -48,11 +48,13 @@ else()
         set(gRPC_BUILD_GRPC_RUBY_PLUGIN OFF CACHE BOOL "" FORCE)
 
         # CMake 4.x rejects cmake_minimum_required < 3.5 in bundled deps.
-        # This policy override lets older third-party CMakeLists.txt configure.
-        if(CMAKE_VERSION VERSION_GREATER_EQUAL "3.27")
-            cmake_policy(SET CMP0148 OLD)
-        endif()
         set(CMAKE_POLICY_VERSION_MINIMUM 3.5 CACHE STRING "" FORCE)
+
+        # Suppress install() errors from gRPC's bundled protobuf + abseil
+        # when built via FetchContent (export sets reference each other).
+        set(gRPC_INSTALL OFF CACHE BOOL "" FORCE)
+        set(protobuf_INSTALL OFF CACHE BOOL "" FORCE)
+        set(ABSL_ENABLE_INSTALL OFF CACHE BOOL "" FORCE)
 
         FetchContent_Declare(
             grpc
@@ -64,7 +66,7 @@ else()
 
         set(_PROTOC $<TARGET_FILE:protoc>)
         set(_GRPC_CPP_PLUGIN $<TARGET_FILE:grpc_cpp_plugin>)
-        set(_GRPC_LIBS grpc++ protobuf::libprotobuf)
+        set(_GRPC_LIBS grpc++ libprotobuf)
     endif()
 endif()
 
