@@ -336,23 +336,34 @@ bool VulkanContext::createCommandPool() {
 }
 
 bool VulkanContext::createSyncObjects() {
-    uint32_t count = static_cast<uint32_t>(swapchainImages_.size());
-    imageAvailableSemaphores_.resize(count);
-    renderFinishedSemaphores_.resize(count);
-    inFlightFences_.resize(count);
+    uint32_t imageCount = static_cast<uint32_t>(swapchainImages_.size());
+
+    // One semaphore pair per swapchain image, indexed by acquired image index
+    imageAvailableSemaphores_.resize(imageCount);
+    renderFinishedSemaphores_.resize(imageCount);
 
     VkSemaphoreCreateInfo semInfo{};
     semInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
+
+    for (uint32_t i = 0; i < imageCount; i++) {
+        VK_CHECK(vkCreateSemaphore(device_, &semInfo, nullptr, &imageAvailableSemaphores_[i]));
+        VK_CHECK(vkCreateSemaphore(device_, &semInfo, nullptr, &renderFinishedSemaphores_[i]));
+    }
+
+    // Fences for frames-in-flight (limit concurrent GPU work)
+    maxFramesInFlight_ = imageCount > 1 ? imageCount - 1 : 1;
+    inFlightFences_.resize(maxFramesInFlight_);
 
     VkFenceCreateInfo fenceInfo{};
     fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
     fenceInfo.flags = VK_FENCE_CREATE_SIGNALED_BIT;
 
-    for (uint32_t i = 0; i < count; i++) {
-        VK_CHECK(vkCreateSemaphore(device_, &semInfo, nullptr, &imageAvailableSemaphores_[i]));
-        VK_CHECK(vkCreateSemaphore(device_, &semInfo, nullptr, &renderFinishedSemaphores_[i]));
+    for (uint32_t i = 0; i < maxFramesInFlight_; i++) {
         VK_CHECK(vkCreateFence(device_, &fenceInfo, nullptr, &inFlightFences_[i]));
     }
+
+    // Track which fence is being used for each swapchain image
+    imagesInFlight_.resize(imageCount, VK_NULL_HANDLE);
 
     return true;
 }
@@ -368,11 +379,14 @@ void VulkanContext::loadFunctionPointers() {
 }
 
 bool VulkanContext::acquireNextImage(uint32_t& imageIndex) {
-    // Wait for this frame slot's previous work to complete.
-    // With N sync objects for N swapchain images, the presentation engine
-    // is guaranteed to have released this semaphore by now.
+    // Wait for the current frame-in-flight fence
     vkWaitForFences(device_, 1, &inFlightFences_[currentFrame_], VK_TRUE, UINT64_MAX);
 
+    // Acquire using a semaphore indexed by currentFrame_ temporarily —
+    // we'll re-index by imageIndex after we know which image we got.
+    // Actually, we acquire with the semaphore for the image we're about to get.
+    // Since we don't know imageIndex yet, use currentFrame_ to pick a semaphore
+    // for the acquire call, then use imageIndex for rendering/presenting.
     VkResult result = vkAcquireNextImageKHR(device_, swapchain_, UINT64_MAX,
         imageAvailableSemaphores_[currentFrame_], VK_NULL_HANDLE, &imageIndex);
 
@@ -385,15 +399,25 @@ bool VulkanContext::acquireNextImage(uint32_t& imageIndex) {
         return false;
     }
 
+    // If another frame-in-flight is still using this image, wait for it
+    if (imagesInFlight_[imageIndex] != VK_NULL_HANDLE) {
+        vkWaitForFences(device_, 1, &imagesInFlight_[imageIndex], VK_TRUE, UINT64_MAX);
+    }
+    imagesInFlight_[imageIndex] = inFlightFences_[currentFrame_];
+
     return true;
 }
 
 void VulkanContext::submitAndPresent(uint32_t imageIndex, VkCommandBuffer cmdBuf) {
     vkResetFences(device_, 1, &inFlightFences_[currentFrame_]);
 
+    // Wait on the acquire semaphore (indexed by currentFrame_, same as in acquireNextImage)
     VkSemaphore waitSemaphores[] = { imageAvailableSemaphores_[currentFrame_] };
     VkPipelineStageFlags waitStages[] = { VK_PIPELINE_STAGE_TRANSFER_BIT };
-    VkSemaphore signalSemaphores[] = { renderFinishedSemaphores_[currentFrame_] };
+    // Signal the render-finished semaphore indexed by imageIndex —
+    // this is the one vkQueuePresentKHR will wait on, and it's tied to
+    // the specific swapchain image being presented.
+    VkSemaphore signalSemaphores[] = { renderFinishedSemaphores_[imageIndex] };
 
     VkSubmitInfo submitInfo{};
     submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
@@ -420,12 +444,10 @@ void VulkanContext::submitAndPresent(uint32_t imageIndex, VkCommandBuffer cmdBuf
         framebufferResized_) {
         framebufferResized_ = false;
         recreateSwapchain();
-        // Don't increment currentFrame_ — recreateSwapchain reset it to 0
-        // and all sync objects were recreated. The next frame starts fresh.
         return;
     }
 
-    currentFrame_ = (currentFrame_ + 1) % static_cast<uint32_t>(swapchainImages_.size());
+    currentFrame_ = (currentFrame_ + 1) % maxFramesInFlight_;
 }
 
 void VulkanContext::cleanupSwapchain() {
@@ -460,14 +482,16 @@ void VulkanContext::recreateSwapchain() {
     }
 
     // Destroy all sync objects
-    for (size_t i = 0; i < imageAvailableSemaphores_.size(); i++) {
-        if (imageAvailableSemaphores_[i]) vkDestroySemaphore(device_, imageAvailableSemaphores_[i], nullptr);
-        if (renderFinishedSemaphores_[i]) vkDestroySemaphore(device_, renderFinishedSemaphores_[i], nullptr);
-        if (inFlightFences_[i]) vkDestroyFence(device_, inFlightFences_[i], nullptr);
-    }
+    for (auto& s : imageAvailableSemaphores_)
+        if (s) vkDestroySemaphore(device_, s, nullptr);
+    for (auto& s : renderFinishedSemaphores_)
+        if (s) vkDestroySemaphore(device_, s, nullptr);
+    for (auto& f : inFlightFences_)
+        if (f) vkDestroyFence(device_, f, nullptr);
     imageAvailableSemaphores_.clear();
     renderFinishedSemaphores_.clear();
     inFlightFences_.clear();
+    imagesInFlight_.clear();
 
     cleanupSwapchain();
     createSwapchain();
@@ -493,11 +517,12 @@ void VulkanContext::destroy() {
         vkDeviceWaitIdle(device_);
     }
 
-    for (size_t i = 0; i < imageAvailableSemaphores_.size(); i++) {
-        if (imageAvailableSemaphores_[i]) vkDestroySemaphore(device_, imageAvailableSemaphores_[i], nullptr);
-        if (renderFinishedSemaphores_[i]) vkDestroySemaphore(device_, renderFinishedSemaphores_[i], nullptr);
-        if (inFlightFences_[i]) vkDestroyFence(device_, inFlightFences_[i], nullptr);
-    }
+    for (auto& s : imageAvailableSemaphores_)
+        if (s) vkDestroySemaphore(device_, s, nullptr);
+    for (auto& s : renderFinishedSemaphores_)
+        if (s) vkDestroySemaphore(device_, s, nullptr);
+    for (auto& f : inFlightFences_)
+        if (f) vkDestroyFence(device_, f, nullptr);
 
     if (!commandBuffers_.empty()) {
         vkFreeCommandBuffers(device_, commandPool_,

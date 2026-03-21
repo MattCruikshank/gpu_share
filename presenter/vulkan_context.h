@@ -74,13 +74,17 @@ private:
     VkCommandPool commandPool_ = VK_NULL_HANDLE;
     std::vector<VkCommandBuffer> commandBuffers_;
 
-    // Sync: one set per swapchain image, indexed by a rotating frame counter.
-    // Using swapchainImageCount semaphores ensures the presentation engine
-    // has released a semaphore by the time we cycle back to it.
-    std::vector<VkSemaphore> imageAvailableSemaphores_;
-    std::vector<VkSemaphore> renderFinishedSemaphores_;
+    // Semaphores indexed by swapchain image index (not frame counter).
+    // This avoids the semaphore reuse hazard where the presentation engine
+    // still holds a semaphore from a previous present of a different image.
+    std::vector<VkSemaphore> imageAvailableSemaphores_; // per swapchain image
+    std::vector<VkSemaphore> renderFinishedSemaphores_; // per swapchain image
+    // Fences indexed by frame-in-flight counter to limit concurrent frames.
     std::vector<VkFence> inFlightFences_;
+    // Track which fence is associated with each swapchain image
+    std::vector<VkFence> imagesInFlight_;
     uint32_t currentFrame_ = 0;
+    uint32_t maxFramesInFlight_ = 2;
     bool framebufferResized_ = false;
 
     VkDebugUtilsMessengerEXT debugMessenger_ = VK_NULL_HANDLE;

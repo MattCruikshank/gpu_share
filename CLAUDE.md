@@ -9,45 +9,51 @@ The long-term vision is a platform where untrusted/sandboxed renderers (potentia
 ## Architecture
 
 ```
-Presenter (C++, SDL3 + Vulkan, gRPC server)
+Presenter (C++, SDL3 + Vulkan, multi-tab)
     |
-    |  gRPC 127.0.0.1:9710 (RendererBridge service)
+    |  Per-tab gRPC server (ports 9710, 9711, 9712, ...)
+    |  RendererBridge service:
     |  - RegisterSurface: renderer sends PID + SharedSurfaceInfo + memory handle
-    |  - StreamInput: server-streams InputEvent (keyboard, mouse, scroll, resize)
+    |  - StreamInput: server-streams InputEvent (keyboard, mouse, scroll, resize, pause/resume)
     |  - NotifySurface: renderer sends updated surface after resize
     |
-    +--- test_renderer (C++, gRPC client, embedded SPIR-V triangle)
-    |    or
-    +--- deno_renderer (Rust + deno_core, gRPC client via tonic, WGSL from TypeScript)
+    +--- Tab 1: deno_renderer → scenes/1.ts (spinning triangle)
+    +--- Tab 2: deno_renderer → scenes/2.ts (bouncing octagon)
+    +--- Tab N: deno_renderer → scenes/N.ts (user-defined)
 ```
+
+### Multi-tab model
+- Presenter starts with no renderers (black window)
+- Number keys 1-9 lazy-spawn a deno_renderer with `scenes/<N>.ts`
+- Each tab gets its own gRPC server on port `BASE_PORT + tab_index`
+- Switching tabs sends `TabPause` to the old tab, `TabResume` to the new one
+- Background tabs sleep at ~2fps to save GPU; active tab runs at ~60fps
+- Input events are forwarded only to the active tab
+- Window title shows current tab number
 
 ### gRPC transport (`proto/gpu_share.proto`)
 - Proto3 schema defines all messages and the `RendererBridge` service
-- C++ code generated via protoc + grpc_cpp_plugin (system packages)
+- C++ code generated via protoc + grpc_cpp_plugin (system packages or vcpkg)
 - Rust code generated via tonic-prost-build in `deno_renderer/build.rs`
-- Protobuf `InputEvent` uses `oneof` for typed event variants — no more raw byte casting
+- TypeScript types generated via protobuf-es, bundled into `proto_bundle.js`
+- Protobuf `InputEvent` uses `oneof` for typed event variants (mouse, keyboard, resize, pause/resume)
+- Events flow as protobuf bytes all the way from C++ presenter → Rust → TypeScript scene scripts
 
 ### Handle passing over gRPC
 - Memory handles are passed as `uint64` fields in protobuf messages
 - **Linux**: receiver clones via `pidfd_open` + `pidfd_getfd` (kernel 5.6+)
 - **Windows**: sender calls `DuplicateHandle` into remote process, sends duplicated handle value
 
-### Key data structures
-- `SharedSurfaceInfo` — defined in both `proto/gpu_share.proto` (wire format) and `shared/shared_handle.h` (internal Vulkan use)
-- `InputEvent` — defined in `proto/gpu_share.proto` as a `oneof` with typed message variants
-- Old C ABI structs in `shared/input_event.h` are no longer used on the wire
-
 ## What exists today
 
 ### Presenter (`presenter/`)
-- C++17, SDL3 + Vulkan, gRPC server (`grpc_server.h/cpp`)
-- Creates window, Vulkan swapchain, imports shared VkImage from renderer
-- Blits renderer's image to swapchain each frame
-- gRPC `RendererBridge` service streams input events to renderer
-- Spawns renderer as child process, terminates on exit
-- Handles window resize (recreates swapchain, tells renderer to resize shared image)
-- `--deno` flag selects deno_renderer, default is test_renderer
-- `--no-spawn` for manual renderer launch, `--port` to override gRPC port
+- C++17, SDL3 + Vulkan, multi-tab gRPC server (`grpc_server.h/cpp`)
+- Creates window, Vulkan swapchain, imports shared VkImage from active renderer
+- Blits active tab's image to swapchain each frame; clears to black if no tab
+- Per-tab `GrpcBridge` instance streams input events to the active renderer
+- Lazy-spawns deno_renderer child processes on number key press
+- Handles window resize (recreates swapchain, tells active renderer to resize)
+- `--port` overrides the base gRPC port (default 9710)
 
 ### Test renderer (`test_renderer/`)
 - C++17, headless Vulkan, gRPC client
@@ -56,15 +62,23 @@ Presenter (C++, SDL3 + Vulkan, gRPC server)
 - Interactive: mouse drag rotates, scroll zooms, space pauses
 - Receives typed protobuf InputEvents via StreamInput server-stream
 - Handles resize via NotifySurface RPC
+- Not currently integrated into the multi-tab presenter (standalone use only)
 
 ### Deno renderer (`deno_renderer/`)
 - Rust, headless Vulkan via ash, TypeScript via deno_core (V8), gRPC client via tonic
 - WGSL shader compilation via naga (same compiler wgpu/WebGPU uses)
-- TypeScript (`scene.ts`) defines shaders, creates pipelines, handles input per-frame
+- Scene scripts in `deno_renderer/scenes/` define shaders, pipelines, and per-frame input handling
 - WebGPU-shaped ops: `op_gpu_create_shader_module`, `op_gpu_create_render_pipeline`, `op_gpu_draw`, `op_gpu_poll_events`, `op_gpu_set_rotation`, etc.
-- Per-frame JS callback (`globalThis.__frame`) receives elapsed time, polls input events
-- Typed protobuf events received via tokio mpsc channel from StreamInput background task
+- Per-frame JS callback (`globalThis.__frame`) receives elapsed time
+- `op_gpu_poll_events` returns length-prefixed protobuf bytes → decoded in TS via `proto.decodeEvents()`
+- `v8_polyfill.js` provides TextEncoder/TextDecoder for bare V8 environment
+- `proto_bundle.js` is an esbuild IIFE bundle of protobuf-es runtime + generated types
+- Supports TabPause/TabResume: sleeps at ~2fps when paused, ~60fps when active
 - Cross-platform: Linux + Windows (Vulkan external memory fd/win32)
+
+### Scenes (`deno_renderer/scenes/`)
+- `1.ts` — Spinning RGB triangle (mouse drag rotates, scroll zooms, space pauses)
+- `2.ts` — Bouncing octagon (space pauses bounce)
 
 ### Transport (legacy: `handle_transport/`)
 - Old TCP implementation, no longer compiled into any target
@@ -76,7 +90,7 @@ Presenter (C++, SDL3 + Vulkan, gRPC server)
 
 ## Build
 
-Requires: Vulkan SDK, CMake 3.25+, C++17 compiler, gRPC + protobuf. Rust toolchain + protoc for deno_renderer. Node.js + npm for TypeScript protobuf bundle.
+Requires: Vulkan SDK, CMake 3.25+, C++17 compiler, gRPC + protobuf. Rust toolchain + protoc for deno_renderer. Node.js + npm for TypeScript protobuf bundle (one-time: `cd deno_renderer && npm install && npm run proto`).
 
 ### Linux
 ```bash
@@ -99,39 +113,43 @@ If vcpkg is not available, CMake falls back to FetchContent (builds gRPC from so
 
 ### Run
 ```bash
-# C++ triangle renderer (default)
+# Presenter opens, press 1-9 to launch tabs
 build/presenter/Debug/presenter.exe
 
-# Rust/TypeScript renderer
-build/presenter/Debug/presenter.exe --deno
+# Standalone test_renderer (not multi-tab, needs manual --no-spawn presenter)
+build/test_renderer/Debug/test_renderer.exe
 ```
 
 ## What's next
 
 ### Near-term
+- Send resize to all connected tabs (not just active) on window resize
 - Integrate wgpu-core so TypeScript gets the real WebGPU API (not just our custom ops)
   - Use `Global::from_hal_instance()` to wrap our ash Instance
   - `CreateDeviceCallback` to inject external memory extensions
   - `create_texture_from_hal()` to wrap the exportable image as a WebGPU texture
   - TypeScript owns the render loop via `requestAnimationFrame`-style callback
-- Multiple renderer tabs (presenter composites N surfaces, tab bar UI)
 - Godot 4.x renderer integration via the GDExtension
+- Integrate test_renderer as a tab option (tab 0 or a flag)
 
 ### Medium-term
 - Renderer crash recovery (detect dead process, show placeholder, re-launch)
 - Resize debouncing (coalesce rapid resize events)
 - Hot-reload TypeScript scene scripts without restarting
+- Tab bar UI overlay
 
 ### Long-term
 - Sandboxed renderer execution (WASM or Deno permissions model)
 - Multiple windows / multi-monitor
 - Shared GPU semaphores for frame-perfect sync (currently unsynchronized mailbox)
 - Performance: profile import overhead, frame latency, skip rate
+- Option to keep background tabs rendering at full rate
 
 ## Conventions
 - C++ code uses `VK_CHECK` macro for Vulkan errors
 - Rust code uses `ash` for Vulkan, `naga` for WGSL compilation, `deno_core` for V8
-- gRPC port 9710 is the default for all components
-- `--port` / `-p` overrides it everywhere
+- gRPC base port 9710, each tab uses `9710 + tab_index`
+- `--port` / `-p` overrides the base port
 - Proto schema is the single source of truth for wire types (`proto/gpu_share.proto`)
-- Presenter auto-finds renderer executables relative to itself or the working directory
+- Presenter auto-finds deno_renderer executable relative to itself
+- Scene scripts resolved relative to the renderer executable (`scenes/<N>.ts`)
