@@ -169,6 +169,8 @@ public:
                 state_->eventQueue.pop();
             }
 
+            fprintf(stderr, "[grpc_server] StreamInput: sending event (case=%d)\n",
+                    event.event_case());
             if (!writer->Write(event)) {
                 fprintf(stderr, "[grpc_server] StreamInput: write failed (client disconnected?)\n");
                 break;
