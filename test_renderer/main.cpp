@@ -808,7 +808,7 @@ int main(int argc, char* argv[]) {
         si->set_format(imageFormat);
         si->set_memory_size(sharedImg.memorySize);
         si->set_memory_type_bits(sharedImg.memoryTypeBits);
-        req.set_memory_handle(static_cast<uint64_t>(sharedImg.handle));
+        req.set_memory_handle((uint64_t)(sharedImg.handle));
 
         gpu_share::ConnectResponse resp;
         grpc::ClientContext ctx;
@@ -916,7 +916,7 @@ int main(int argc, char* argv[]) {
                             si->set_format(imageFormat);
                             si->set_memory_size(sharedImg.memorySize);
                             si->set_memory_type_bits(sharedImg.memoryTypeBits);
-                            update.set_memory_handle(static_cast<uint64_t>(sharedImg.handle));
+                            update.set_memory_handle((uint64_t)(sharedImg.handle));
 
                             gpu_share::SurfaceAck ack;
                             grpc::ClientContext rctx;
