@@ -18,10 +18,7 @@ const {
 } = Deno.core.ops;
 
 // proto is set by proto_bundle.js on globalThis
-declare const proto: {
-  decodeEvents(buf: Uint8Array): any[];
-  InputEventSchema: any;
-};
+// (globalThis.proto.decodeEvents, globalThis.proto.InputEventSchema)
 
 op_log("Scene script loaded — setting up WebGPU pipeline");
 
@@ -85,7 +82,7 @@ if (shader === 0xFFFFFFFF) {
     let scale = 1.0;
     let dragging = false;
 
-    globalThis.__frame = (elapsed: number) => {
+    globalThis.__frame = (elapsed) => {
       // op_gpu_poll_events returns length-prefixed protobuf bytes
       const rawBuf = op_gpu_poll_events();
       const events = proto.decodeEvents(rawBuf);
