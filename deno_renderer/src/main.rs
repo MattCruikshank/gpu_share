@@ -1125,10 +1125,10 @@ mod transport {
                 let req = gpu_share_proto::StreamInputRequest {};
                 match stream_client.stream_input(req).await {
                     Ok(response) => {
-                        eprintln!("[transport] StreamInput connected, waiting for events");
+                        // eprintln!("[transport] StreamInput connected, waiting for events");
                         let mut stream = response.into_inner();
                         while let Ok(Some(ev)) = stream.message().await {
-                            eprintln!("[transport] Received event: case={:?}", ev.event);
+                            // eprintln!("[transport] Received event: case={:?}", ev.event);
                             if tx.send(ev).is_err() {
                                 break;
                             }
@@ -1560,7 +1560,7 @@ fn main() {
                 while let Some(ev) = transport.recv_event() {
                     use gpu_share_proto::input_event::Event;
 
-                    eprintln!("[render_loop] Got event: {:?}", ev.event);
+                    // eprintln!("[render_loop] Got event: {:?}", ev.event);
 
                     // Check for resize (needs Vulkan handling in Rust)
                     if let Some(Event::Resize(r)) = &ev.event {
