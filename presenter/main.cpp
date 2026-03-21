@@ -8,6 +8,9 @@
 #include <cstdio>
 #include <cstring>
 #include <string>
+#include <vector>
+#include <memory>
+#include <thread>
 
 #ifdef _WIN32
     #include <windows.h>
@@ -17,6 +20,9 @@
     #include <signal.h>
 #endif
 
+static constexpr int MAX_TABS = 9;
+static constexpr uint16_t BASE_PORT = 9710;
+
 // ---------------------------------------------------------------------------
 // Child process management
 // ---------------------------------------------------------------------------
@@ -25,8 +31,9 @@ struct ChildProcess {
     PROCESS_INFORMATION pi{};
     bool valid = false;
 
-    bool spawn(const std::string& exe, const std::string& args) {
-        std::string cmdLine = "\"" + exe + "\" " + args;
+    bool spawn(const std::string& exe, const std::vector<std::string>& args) {
+        std::string cmdLine = "\"" + exe + "\"";
+        for (auto& a : args) cmdLine += " " + a;
         STARTUPINFOA si{};
         si.cb = sizeof(si);
         if (!CreateProcessA(nullptr, const_cast<char*>(cmdLine.c_str()),
@@ -50,27 +57,17 @@ struct ChildProcess {
 #else
     pid_t pid = -1;
 
-    bool spawn(const std::string& exe, const std::string& args) {
+    bool spawn(const std::string& exe, const std::vector<std::string>& args) {
         pid = fork();
-        if (pid < 0) {
-            perror("fork");
-            return false;
-        }
+        if (pid < 0) { perror("fork"); return false; }
         if (pid == 0) {
-            // Child — parse args and exec
-            std::string portArg;
-            auto pos = args.find("--port ");
-            if (pos != std::string::npos) {
-                portArg = args.substr(pos + 7);
-                while (!portArg.empty() && portArg.back() == ' ')
-                    portArg.pop_back();
-            }
-            if (!portArg.empty()) {
-                execlp(exe.c_str(), exe.c_str(), "--port", portArg.c_str(), nullptr);
-            } else {
-                execlp(exe.c_str(), exe.c_str(), nullptr);
-            }
-            perror("execlp");
+            // Build argv for execv
+            std::vector<const char*> argv;
+            argv.push_back(exe.c_str());
+            for (auto& a : args) argv.push_back(a.c_str());
+            argv.push_back(nullptr);
+            execv(exe.c_str(), const_cast<char* const*>(argv.data()));
+            perror("execv");
             _exit(1);
         }
         return true;
@@ -84,6 +81,21 @@ struct ChildProcess {
         pid = -1;
     }
 #endif
+};
+
+// ---------------------------------------------------------------------------
+// Tab: one renderer process + its gRPC bridge + imported surface
+// ---------------------------------------------------------------------------
+struct Tab {
+    int index = -1;                          // 0-based (tab "1" = index 0)
+    std::string scriptName;                  // e.g. "scenes/1.ts"
+    uint16_t port = 0;
+    std::unique_ptr<GrpcBridge> bridge;
+    ChildProcess process;
+    ImportedSurface imported{};
+    bool spawned = false;
+    bool connected = false;
+    bool hasImportedSurface = false;
 };
 
 // ---------------------------------------------------------------------------
@@ -105,14 +117,12 @@ static std::string findExe(const char* presenterArgv0, const std::string& name) 
     std::string ext;
 #endif
 
-    // Same directory as presenter
     std::string sameDir;
     if (lastSep != std::string::npos)
         sameDir = path.substr(0, lastSep + 1);
     std::string candidate = sameDir + name + ext;
     if (fileExists(candidate)) return candidate;
 
-    // MSVC multi-config: build/presenter/Debug/ → build/<name>/Debug/
     if (lastSep != std::string::npos) {
         auto configSep = path.find_last_of("/\\", lastSep - 1);
         if (configSep != std::string::npos) {
@@ -126,7 +136,6 @@ static std::string findExe(const char* presenterArgv0, const std::string& name) 
         }
     }
 
-    // Cargo build: walk up from exe dir to find <root>/<name>/target/debug/<name>
     if (lastSep != std::string::npos) {
         std::string sep(1, path[lastSep]);
         std::string dir = path.substr(0, lastSep);
@@ -141,7 +150,6 @@ static std::string findExe(const char* presenterArgv0, const std::string& name) 
         }
     }
 
-    // Try from current working directory
 #ifdef _WIN32
     std::string sep = "\\";
 #else
@@ -152,36 +160,64 @@ static std::string findExe(const char* presenterArgv0, const std::string& name) 
     candidate = name + sep + "target" + sep + "release" + sep + name + ext;
     if (fileExists(candidate)) return candidate;
 
-    // Fallback
     return name + ext;
 }
 
+// ---------------------------------------------------------------------------
+// Spawn and connect a tab's renderer
+// ---------------------------------------------------------------------------
+static bool spawnTab(Tab& tab, const std::string& rendererExe, VkDevice device,
+                     VkPhysicalDevice physDevice) {
+    // Start gRPC server for this tab
+    tab.bridge = std::make_unique<GrpcBridge>();
+    if (!tab.bridge->start(tab.port)) {
+        fprintf(stderr, "[tab %d] Failed to start gRPC on port %u\n", tab.index + 1, tab.port);
+        return false;
+    }
+
+    // Spawn renderer
+    std::vector<std::string> args = {
+        "--port", std::to_string(tab.port),
+        "--script", tab.scriptName
+    };
+    fprintf(stderr, "[tab %d] Launching: %s --port %u --script %s\n",
+            tab.index + 1, rendererExe.c_str(), tab.port, tab.scriptName.c_str());
+    if (!tab.process.spawn(rendererExe, args)) {
+        fprintf(stderr, "[tab %d] Failed to spawn renderer\n", tab.index + 1);
+        tab.bridge->stop();
+        tab.bridge.reset();
+        return false;
+    }
+
+    tab.spawned = true;
+
+    // Wait for renderer to connect (in a background thread so we don't block the main loop)
+    // For simplicity, do a short blocking wait here
+    SharedMemoryHandle handle = kInvalidMemoryHandle;
+    SharedSurfaceInfo info{};
+    if (!tab.bridge->waitForRenderer(handle, info, 15000)) {
+        fprintf(stderr, "[tab %d] Renderer failed to connect\n", tab.index + 1);
+        return false;
+    }
+
+    tab.imported = importSurface(device, physDevice, handle, info);
+    tab.hasImportedSurface = (tab.imported.image != VK_NULL_HANDLE);
+    tab.connected = true;
+
+    fprintf(stderr, "[tab %d] Connected: %ux%u\n", tab.index + 1, info.width, info.height);
+    return true;
+}
+
 int main(int argc, char* argv[]) {
-    const char* port = "9710";
-    const char* rendererPath = nullptr;
-    bool noSpawn = false;
-    bool useDeno = false;
+    uint16_t basePort = BASE_PORT;
 
     for (int i = 1; i < argc; i++) {
         if ((strcmp(argv[i], "--port") == 0 || strcmp(argv[i], "-p") == 0) && i + 1 < argc) {
-            port = argv[++i];
-        } else if (strcmp(argv[i], "--renderer") == 0 && i + 1 < argc) {
-            rendererPath = argv[++i];
-        } else if (strcmp(argv[i], "--no-spawn") == 0) {
-            noSpawn = true;
-        } else if (strcmp(argv[i], "--deno") == 0) {
-            useDeno = true;
+            basePort = static_cast<uint16_t>(std::stoi(argv[++i]));
         }
     }
 
-    // Determine renderer exe path
-    std::string rendererExe;
-    if (rendererPath) {
-        rendererExe = rendererPath;
-    } else {
-        std::string name = useDeno ? "deno_renderer" : "test_renderer";
-        rendererExe = findExe(argv[0], name);
-    }
+    std::string rendererExe = findExe(argv[0], "deno_renderer");
 
     if (!SDL_Init(SDL_INIT_VIDEO)) {
         fprintf(stderr, "SDL_Init failed: %s\n", SDL_GetError());
@@ -204,55 +240,18 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    // Start gRPC server before spawning renderer
-    GrpcBridge bridge;
-    uint16_t portNum = static_cast<uint16_t>(std::stoi(port));
-    if (!bridge.start(portNum)) {
-        fprintf(stderr, "Failed to start gRPC server\n");
-        vkCtx.destroy();
-        SDL_DestroyWindow(window);
-        SDL_Quit();
-        return 1;
+    // Tab state
+    Tab tabs[MAX_TABS];
+    for (int i = 0; i < MAX_TABS; i++) {
+        tabs[i].index = i;
+        tabs[i].scriptName = "scenes/" + std::to_string(i + 1) + ".ts";
+        tabs[i].port = basePort + static_cast<uint16_t>(i);
     }
-
-    // Launch renderer process (unless --no-spawn)
-    ChildProcess renderer;
-    if (!noSpawn) {
-        std::string rendererArgs = std::string("--port ") + port;
-        fprintf(stderr, "Launching renderer: %s %s\n",
-                rendererExe.c_str(), rendererArgs.c_str());
-        if (!renderer.spawn(rendererExe, rendererArgs)) {
-            fprintf(stderr, "Failed to launch renderer\n");
-            bridge.stop();
-            vkCtx.destroy();
-            SDL_DestroyWindow(window);
-            SDL_Quit();
-            return 1;
-        }
-    }
-
-    // Wait for renderer to connect via gRPC
-    SharedMemoryHandle memoryHandle = kInvalidMemoryHandle;
-    SharedSurfaceInfo surfaceInfo{};
-    fprintf(stderr, "Waiting for renderer to connect via gRPC...\n");
-    if (!bridge.waitForRenderer(memoryHandle, surfaceInfo)) {
-        fprintf(stderr, "Failed to receive surface info from renderer\n");
-        bridge.stop();
-        renderer.terminate();
-        vkCtx.destroy();
-        SDL_DestroyWindow(window);
-        SDL_Quit();
-        return 1;
-    }
-    fprintf(stderr, "Received surface: %ux%u\n",
-            surfaceInfo.width, surfaceInfo.height);
-
-    // Import the shared surface
-    ImportedSurface imported = importSurface(vkCtx.getDevice(), vkCtx.getPhysicalDevice(),
-                                            memoryHandle, surfaceInfo);
-    bool hasImportedSurface = (imported.image != VK_NULL_HANDLE);
+    int activeTab = -1;  // -1 = no active tab
 
     Compositor compositor;
+
+    fprintf(stderr, "Presenter ready. Press 1-%d to launch/switch tabs. ESC to quit.\n", MAX_TABS);
 
     // Main loop
     bool running = true;
@@ -267,53 +266,100 @@ int main(int argc, char* argv[]) {
                 event.key.key == SDLK_ESCAPE) {
                 running = false;
             }
+
+            // Number keys 1-9: switch/launch tabs
+            if (event.type == SDL_EVENT_KEY_DOWN) {
+                int tabNum = -1;
+                SDL_Keycode key = event.key.key;
+                if (key >= SDLK_1 && key <= SDLK_9) {
+                    tabNum = key - SDLK_1;  // 0-based
+                }
+                if (tabNum >= 0 && tabNum < MAX_TABS && tabNum != activeTab) {
+                    // Pause the old active tab
+                    if (activeTab >= 0 && tabs[activeTab].connected) {
+                        tabs[activeTab].bridge->pushTabPause();
+                    }
+
+                    // Lazy-spawn if needed
+                    if (!tabs[tabNum].spawned) {
+                        fprintf(stderr, "Spawning tab %d...\n", tabNum + 1);
+                        if (!spawnTab(tabs[tabNum], rendererExe,
+                                      vkCtx.getDevice(), vkCtx.getPhysicalDevice())) {
+                            fprintf(stderr, "Failed to spawn tab %d\n", tabNum + 1);
+                            continue;
+                        }
+                    }
+
+                    // Resume the new tab
+                    if (tabs[tabNum].connected) {
+                        tabs[tabNum].bridge->pushTabResume();
+                    }
+
+                    activeTab = tabNum;
+                    fprintf(stderr, "Switched to tab %d\n", activeTab + 1);
+
+                    // Update window title
+                    std::string title = "GPU Share - Tab " + std::to_string(activeTab + 1);
+                    SDL_SetWindowTitle(window, title.c_str());
+                }
+            }
+
             if (event.type == SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED) {
                 vkCtx.notifyResized();
-                // Tell renderer to resize its shared surface
-                if (hasImportedSurface) {
+                // Tell active renderer to resize
+                if (activeTab >= 0 && tabs[activeTab].hasImportedSurface) {
                     int pw, ph;
                     SDL_GetWindowSizeInPixels(window, &pw, &ph);
-                    bridge.pushResize(static_cast<uint32_t>(pw),
-                                      static_cast<uint32_t>(ph));
+                    tabs[activeTab].bridge->pushResize(
+                        static_cast<uint32_t>(pw), static_cast<uint32_t>(ph));
                 }
             }
 
-            // Forward input to renderer
-            if (event.type == SDL_EVENT_MOUSE_BUTTON_DOWN ||
-                event.type == SDL_EVENT_MOUSE_BUTTON_UP) {
-                bool pressed = (event.type == SDL_EVENT_MOUSE_BUTTON_DOWN);
-                bridge.pushMouseButton(event.button.button, pressed,
-                                       event.button.x, event.button.y);
-                mouseDragging = (pressed && event.button.button == 1);
-            }
-            else if (event.type == SDL_EVENT_MOUSE_MOTION && mouseDragging) {
-                bridge.pushMouseMotion(event.motion.x, event.motion.y,
-                                       event.motion.xrel, event.motion.yrel);
-            }
-            else if (event.type == SDL_EVENT_MOUSE_WHEEL) {
-                bridge.pushMouseWheel(event.wheel.y);
-            }
-            else if (event.type == SDL_EVENT_KEY_DOWN || event.type == SDL_EVENT_KEY_UP) {
-                if (event.type == SDL_EVENT_KEY_DOWN) {
-                    bridge.pushKeyDown(event.key.scancode);
-                } else {
-                    bridge.pushKeyUp(event.key.scancode);
+            // Forward input to active renderer only
+            if (activeTab >= 0 && tabs[activeTab].connected) {
+                auto& bridge = *tabs[activeTab].bridge;
+
+                if (event.type == SDL_EVENT_MOUSE_BUTTON_DOWN ||
+                    event.type == SDL_EVENT_MOUSE_BUTTON_UP) {
+                    bool pressed = (event.type == SDL_EVENT_MOUSE_BUTTON_DOWN);
+                    bridge.pushMouseButton(event.button.button, pressed,
+                                           event.button.x, event.button.y);
+                    mouseDragging = (pressed && event.button.button == 1);
+                }
+                else if (event.type == SDL_EVENT_MOUSE_MOTION && mouseDragging) {
+                    bridge.pushMouseMotion(event.motion.x, event.motion.y,
+                                           event.motion.xrel, event.motion.yrel);
+                }
+                else if (event.type == SDL_EVENT_MOUSE_WHEEL) {
+                    bridge.pushMouseWheel(event.wheel.y);
+                }
+                else if (event.type == SDL_EVENT_KEY_DOWN || event.type == SDL_EVENT_KEY_UP) {
+                    if (event.type == SDL_EVENT_KEY_DOWN) {
+                        bridge.pushKeyDown(event.key.scancode);
+                    } else {
+                        bridge.pushKeyUp(event.key.scancode);
+                    }
                 }
             }
         }
 
-        // Check if renderer sent a new shared surface (after resize)
-        SharedMemoryHandle newHandle = kInvalidMemoryHandle;
-        SharedSurfaceInfo newInfo{};
-        if (bridge.pollSurfaceUpdate(newHandle, newInfo)) {
-            vkDeviceWaitIdle(vkCtx.getDevice());
-            imported.destroy(vkCtx.getDevice());
-            imported = importSurface(vkCtx.getDevice(), vkCtx.getPhysicalDevice(),
-                                     newHandle, newInfo);
-            hasImportedSurface = (imported.image != VK_NULL_HANDLE);
-            fprintf(stderr, "Re-imported surface: %ux%u\n", newInfo.width, newInfo.height);
+        // Poll all connected tabs for surface updates (resize responses)
+        for (int i = 0; i < MAX_TABS; i++) {
+            if (!tabs[i].connected) continue;
+            SharedMemoryHandle newHandle = kInvalidMemoryHandle;
+            SharedSurfaceInfo newInfo{};
+            if (tabs[i].bridge->pollSurfaceUpdate(newHandle, newInfo)) {
+                vkDeviceWaitIdle(vkCtx.getDevice());
+                tabs[i].imported.destroy(vkCtx.getDevice());
+                tabs[i].imported = importSurface(vkCtx.getDevice(), vkCtx.getPhysicalDevice(),
+                                                  newHandle, newInfo);
+                tabs[i].hasImportedSurface = (tabs[i].imported.image != VK_NULL_HANDLE);
+                fprintf(stderr, "[tab %d] Re-imported surface: %ux%u\n",
+                        i + 1, newInfo.width, newInfo.height);
+            }
         }
 
+        // Render
         uint32_t imageIndex = 0;
         if (!vkCtx.acquireNextImage(imageIndex)) continue;
         VkCommandBuffer cmd = vkCtx.getCurrentCommandBuffer();
@@ -328,9 +374,10 @@ int main(int argc, char* argv[]) {
         VkImage swapImage = vkCtx.getSwapchainImage(imageIndex);
         VkExtent2D extent = vkCtx.getSwapchainExtent();
 
-        if (hasImportedSurface) {
+        if (activeTab >= 0 && tabs[activeTab].hasImportedSurface) {
+            auto& imp = tabs[activeTab].imported;
             compositor.recordBlit(cmd,
-                imported.image, imported.info.width, imported.info.height,
+                imp.image, imp.info.width, imp.info.height,
                 swapImage, extent.width, extent.height);
         } else {
             compositor.recordClear(cmd, swapImage, extent.width, extent.height);
@@ -341,12 +388,18 @@ int main(int argc, char* argv[]) {
         vkCtx.submitAndPresent(imageIndex, cmd);
     }
 
+    // Cleanup
     vkDeviceWaitIdle(vkCtx.getDevice());
 
-    imported.destroy(vkCtx.getDevice());
+    for (int i = 0; i < MAX_TABS; i++) {
+        if (tabs[i].hasImportedSurface) {
+            tabs[i].imported.destroy(vkCtx.getDevice());
+        }
+        if (tabs[i].bridge) tabs[i].bridge->stop();
+        if (tabs[i].spawned) tabs[i].process.terminate();
+    }
+
     vkCtx.destroy();
-    bridge.stop();
-    renderer.terminate();
     SDL_DestroyWindow(window);
     SDL_Quit();
 

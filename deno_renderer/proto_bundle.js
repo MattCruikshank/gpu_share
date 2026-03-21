@@ -2992,55 +2992,10 @@
   }
 
   // gen/gpu_share_pb.js
-  var file_gpu_share = /* @__PURE__ */ fileDesc("Cg9ncHVfc2hhcmUucHJvdG8SCWdwdV9zaGFyZSJsCg5Db25uZWN0UmVxdWVzdBIUCgxyZW5kZXJlcl9waWQYASABKA0SLQoHc3VyZmFjZRgCIAEoCzIcLmdwdV9zaGFyZS5TaGFyZWRTdXJmYWNlSW5mbxIVCg1tZW1vcnlfaGFuZGxlGAMgASgEIigKD0Nvbm5lY3RSZXNwb25zZRIVCg1wcmVzZW50ZXJfcGlkGAEgASgNInEKEVNoYXJlZFN1cmZhY2VJbmZvEg0KBXdpZHRoGAEgASgNEg4KBmhlaWdodBgCIAEoDRIOCgZmb3JtYXQYAyABKA0SEwoLbWVtb3J5X3NpemUYBCABKAQSGAoQbWVtb3J5X3R5cGVfYml0cxgFIAEoDSKYAgoKSW5wdXRFdmVudBIuCgxtb3VzZV9tb3Rpb24YASABKAsyFi5ncHVfc2hhcmUuTW91c2VNb3Rpb25IABIuCgxtb3VzZV9idXR0b24YAiABKAsyFi5ncHVfc2hhcmUuTW91c2VCdXR0b25IABIsCgttb3VzZV93aGVlbBgDIAEoCzIVLmdwdV9zaGFyZS5Nb3VzZVdoZWVsSAASJwoIa2V5X2Rvd24YBCABKAsyEy5ncHVfc2hhcmUuS2V5RXZlbnRIABIlCgZrZXlfdXAYBSABKAsyEy5ncHVfc2hhcmUuS2V5RXZlbnRIABIjCgZyZXNpemUYBiABKAsyES5ncHVfc2hhcmUuUmVzaXplSABCBwoFZXZlbnQiQQoLTW91c2VNb3Rpb24SCQoBeBgBIAEoAhIJCgF5GAIgASgCEg0KBXJlbF94GAMgASgCEg0KBXJlbF95GAQgASgCIkQKC01vdXNlQnV0dG9uEg4KBmJ1dHRvbhgBIAEoDRIPCgdwcmVzc2VkGAIgASgIEgkKAXgYAyABKAISCQoBeRgEIAEoAiIeCgpNb3VzZVdoZWVsEhAKCHNjcm9sbF95GAEgASgCIhwKCEtleUV2ZW50EhAKCHNjYW5jb2RlGAEgASgNIicKBlJlc2l6ZRINCgV3aWR0aBgBIAEoDRIOCgZoZWlnaHQYAiABKA0iVQoNU3VyZmFjZVVwZGF0ZRItCgdzdXJmYWNlGAEgASgLMhwuZ3B1X3NoYXJlLlNoYXJlZFN1cmZhY2VJbmZvEhUKDW1lbW9yeV9oYW5kbGUYAiABKAQiDAoKU3VyZmFjZUFjayIUChJTdHJlYW1JbnB1dFJlcXVlc3Qy4wEKDlJlbmRlcmVyQnJpZGdlEkgKD1JlZ2lzdGVyU3VyZmFjZRIZLmdwdV9zaGFyZS5Db25uZWN0UmVxdWVzdBoaLmdwdV9zaGFyZS5Db25uZWN0UmVzcG9uc2USRQoLU3RyZWFtSW5wdXQSHS5ncHVfc2hhcmUuU3RyZWFtSW5wdXRSZXF1ZXN0GhUuZ3B1X3NoYXJlLklucHV0RXZlbnQwARJACg1Ob3RpZnlTdXJmYWNlEhguZ3B1X3NoYXJlLlN1cmZhY2VVcGRhdGUaFS5ncHVfc2hhcmUuU3VyZmFjZUFja2IGcHJvdG8z");
+  var file_gpu_share = /* @__PURE__ */ fileDesc("Cg9ncHVfc2hhcmUucHJvdG8SCWdwdV9zaGFyZSJsCg5Db25uZWN0UmVxdWVzdBIUCgxyZW5kZXJlcl9waWQYASABKA0SLQoHc3VyZmFjZRgCIAEoCzIcLmdwdV9zaGFyZS5TaGFyZWRTdXJmYWNlSW5mbxIVCg1tZW1vcnlfaGFuZGxlGAMgASgEIigKD0Nvbm5lY3RSZXNwb25zZRIVCg1wcmVzZW50ZXJfcGlkGAEgASgNInEKEVNoYXJlZFN1cmZhY2VJbmZvEg0KBXdpZHRoGAEgASgNEg4KBmhlaWdodBgCIAEoDRIOCgZmb3JtYXQYAyABKA0SEwoLbWVtb3J5X3NpemUYBCABKAQSGAoQbWVtb3J5X3R5cGVfYml0cxgFIAEoDSLuAgoKSW5wdXRFdmVudBIuCgxtb3VzZV9tb3Rpb24YASABKAsyFi5ncHVfc2hhcmUuTW91c2VNb3Rpb25IABIuCgxtb3VzZV9idXR0b24YAiABKAsyFi5ncHVfc2hhcmUuTW91c2VCdXR0b25IABIsCgttb3VzZV93aGVlbBgDIAEoCzIVLmdwdV9zaGFyZS5Nb3VzZVdoZWVsSAASJwoIa2V5X2Rvd24YBCABKAsyEy5ncHVfc2hhcmUuS2V5RXZlbnRIABIlCgZrZXlfdXAYBSABKAsyEy5ncHVfc2hhcmUuS2V5RXZlbnRIABIjCgZyZXNpemUYBiABKAsyES5ncHVfc2hhcmUuUmVzaXplSAASKAoJdGFiX3BhdXNlGAcgASgLMhMuZ3B1X3NoYXJlLlRhYlBhdXNlSAASKgoKdGFiX3Jlc3VtZRgIIAEoCzIULmdwdV9zaGFyZS5UYWJSZXN1bWVIAEIHCgVldmVudCIKCghUYWJQYXVzZSILCglUYWJSZXN1bWUiQQoLTW91c2VNb3Rpb24SCQoBeBgBIAEoAhIJCgF5GAIgASgCEg0KBXJlbF94GAMgASgCEg0KBXJlbF95GAQgASgCIkQKC01vdXNlQnV0dG9uEg4KBmJ1dHRvbhgBIAEoDRIPCgdwcmVzc2VkGAIgASgIEgkKAXgYAyABKAISCQoBeRgEIAEoAiIeCgpNb3VzZVdoZWVsEhAKCHNjcm9sbF95GAEgASgCIhwKCEtleUV2ZW50EhAKCHNjYW5jb2RlGAEgASgNIicKBlJlc2l6ZRINCgV3aWR0aBgBIAEoDRIOCgZoZWlnaHQYAiABKA0iVQoNU3VyZmFjZVVwZGF0ZRItCgdzdXJmYWNlGAEgASgLMhwuZ3B1X3NoYXJlLlNoYXJlZFN1cmZhY2VJbmZvEhUKDW1lbW9yeV9oYW5kbGUYAiABKAQiDAoKU3VyZmFjZUFjayIUChJTdHJlYW1JbnB1dFJlcXVlc3Qy4wEKDlJlbmRlcmVyQnJpZGdlEkgKD1JlZ2lzdGVyU3VyZmFjZRIZLmdwdV9zaGFyZS5Db25uZWN0UmVxdWVzdBoaLmdwdV9zaGFyZS5Db25uZWN0UmVzcG9uc2USRQoLU3RyZWFtSW5wdXQSHS5ncHVfc2hhcmUuU3RyZWFtSW5wdXRSZXF1ZXN0GhUuZ3B1X3NoYXJlLklucHV0RXZlbnQwARJACg1Ob3RpZnlTdXJmYWNlEhguZ3B1X3NoYXJlLlN1cmZhY2VVcGRhdGUaFS5ncHVfc2hhcmUuU3VyZmFjZUFja2IGcHJvdG8z");
   var InputEventSchema = /* @__PURE__ */ messageDesc(file_gpu_share, 3);
 
   // proto_entry.js
-  if (typeof globalThis.TextEncoder === "undefined") {
-    globalThis.TextEncoder = class TextEncoder {
-      encode(str) {
-        const buf = new Uint8Array(str.length * 3);
-        let pos = 0;
-        for (let i = 0; i < str.length; i++) {
-          let c = str.charCodeAt(i);
-          if (c < 128) {
-            buf[pos++] = c;
-          } else if (c < 2048) {
-            buf[pos++] = 192 | c >> 6;
-            buf[pos++] = 128 | c & 63;
-          } else {
-            buf[pos++] = 224 | c >> 12;
-            buf[pos++] = 128 | c >> 6 & 63;
-            buf[pos++] = 128 | c & 63;
-          }
-        }
-        return buf.subarray(0, pos);
-      }
-    };
-  }
-  if (typeof globalThis.TextDecoder === "undefined") {
-    globalThis.TextDecoder = class TextDecoder {
-      decode(buf) {
-        if (!buf) return "";
-        const bytes = new Uint8Array(buf);
-        let str = "";
-        for (let i = 0; i < bytes.length; ) {
-          let c = bytes[i];
-          if (c < 128) {
-            str += String.fromCharCode(c);
-            i++;
-          } else if (c < 224) {
-            str += String.fromCharCode((c & 31) << 6 | bytes[i + 1] & 63);
-            i += 2;
-          } else {
-            str += String.fromCharCode((c & 15) << 12 | (bytes[i + 1] & 63) << 6 | bytes[i + 2] & 63);
-            i += 3;
-          }
-        }
-        return str;
-      }
-    };
-  }
   globalThis.proto = {
     fromBinary,
     InputEventSchema,

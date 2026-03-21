@@ -359,6 +359,26 @@ void GrpcBridge::pushResize(uint32_t width, uint32_t height) {
     impl_->state.eventCv.notify_one();
 }
 
+void GrpcBridge::pushTabPause() {
+    gpu_share::InputEvent ev;
+    ev.mutable_tab_pause();
+    {
+        std::lock_guard<std::mutex> lk(impl_->state.eventMu);
+        impl_->state.eventQueue.push(std::move(ev));
+    }
+    impl_->state.eventCv.notify_one();
+}
+
+void GrpcBridge::pushTabResume() {
+    gpu_share::InputEvent ev;
+    ev.mutable_tab_resume();
+    {
+        std::lock_guard<std::mutex> lk(impl_->state.eventMu);
+        impl_->state.eventQueue.push(std::move(ev));
+    }
+    impl_->state.eventCv.notify_one();
+}
+
 bool GrpcBridge::pollSurfaceUpdate(SharedMemoryHandle& outHandle,
                                     SharedSurfaceInfo& outInfo) {
     std::lock_guard<std::mutex> lk(impl_->state.surfaceMu);

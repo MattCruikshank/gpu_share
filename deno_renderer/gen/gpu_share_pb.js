@@ -8,7 +8,7 @@ import { fileDesc, messageDesc, serviceDesc } from "@bufbuild/protobuf/codegenv2
  * Describes the file gpu_share.proto.
  */
 export const file_gpu_share = /*@__PURE__*/
-  fileDesc("Cg9ncHVfc2hhcmUucHJvdG8SCWdwdV9zaGFyZSJsCg5Db25uZWN0UmVxdWVzdBIUCgxyZW5kZXJlcl9waWQYASABKA0SLQoHc3VyZmFjZRgCIAEoCzIcLmdwdV9zaGFyZS5TaGFyZWRTdXJmYWNlSW5mbxIVCg1tZW1vcnlfaGFuZGxlGAMgASgEIigKD0Nvbm5lY3RSZXNwb25zZRIVCg1wcmVzZW50ZXJfcGlkGAEgASgNInEKEVNoYXJlZFN1cmZhY2VJbmZvEg0KBXdpZHRoGAEgASgNEg4KBmhlaWdodBgCIAEoDRIOCgZmb3JtYXQYAyABKA0SEwoLbWVtb3J5X3NpemUYBCABKAQSGAoQbWVtb3J5X3R5cGVfYml0cxgFIAEoDSKYAgoKSW5wdXRFdmVudBIuCgxtb3VzZV9tb3Rpb24YASABKAsyFi5ncHVfc2hhcmUuTW91c2VNb3Rpb25IABIuCgxtb3VzZV9idXR0b24YAiABKAsyFi5ncHVfc2hhcmUuTW91c2VCdXR0b25IABIsCgttb3VzZV93aGVlbBgDIAEoCzIVLmdwdV9zaGFyZS5Nb3VzZVdoZWVsSAASJwoIa2V5X2Rvd24YBCABKAsyEy5ncHVfc2hhcmUuS2V5RXZlbnRIABIlCgZrZXlfdXAYBSABKAsyEy5ncHVfc2hhcmUuS2V5RXZlbnRIABIjCgZyZXNpemUYBiABKAsyES5ncHVfc2hhcmUuUmVzaXplSABCBwoFZXZlbnQiQQoLTW91c2VNb3Rpb24SCQoBeBgBIAEoAhIJCgF5GAIgASgCEg0KBXJlbF94GAMgASgCEg0KBXJlbF95GAQgASgCIkQKC01vdXNlQnV0dG9uEg4KBmJ1dHRvbhgBIAEoDRIPCgdwcmVzc2VkGAIgASgIEgkKAXgYAyABKAISCQoBeRgEIAEoAiIeCgpNb3VzZVdoZWVsEhAKCHNjcm9sbF95GAEgASgCIhwKCEtleUV2ZW50EhAKCHNjYW5jb2RlGAEgASgNIicKBlJlc2l6ZRINCgV3aWR0aBgBIAEoDRIOCgZoZWlnaHQYAiABKA0iVQoNU3VyZmFjZVVwZGF0ZRItCgdzdXJmYWNlGAEgASgLMhwuZ3B1X3NoYXJlLlNoYXJlZFN1cmZhY2VJbmZvEhUKDW1lbW9yeV9oYW5kbGUYAiABKAQiDAoKU3VyZmFjZUFjayIUChJTdHJlYW1JbnB1dFJlcXVlc3Qy4wEKDlJlbmRlcmVyQnJpZGdlEkgKD1JlZ2lzdGVyU3VyZmFjZRIZLmdwdV9zaGFyZS5Db25uZWN0UmVxdWVzdBoaLmdwdV9zaGFyZS5Db25uZWN0UmVzcG9uc2USRQoLU3RyZWFtSW5wdXQSHS5ncHVfc2hhcmUuU3RyZWFtSW5wdXRSZXF1ZXN0GhUuZ3B1X3NoYXJlLklucHV0RXZlbnQwARJACg1Ob3RpZnlTdXJmYWNlEhguZ3B1X3NoYXJlLlN1cmZhY2VVcGRhdGUaFS5ncHVfc2hhcmUuU3VyZmFjZUFja2IGcHJvdG8z");
+  fileDesc("Cg9ncHVfc2hhcmUucHJvdG8SCWdwdV9zaGFyZSJsCg5Db25uZWN0UmVxdWVzdBIUCgxyZW5kZXJlcl9waWQYASABKA0SLQoHc3VyZmFjZRgCIAEoCzIcLmdwdV9zaGFyZS5TaGFyZWRTdXJmYWNlSW5mbxIVCg1tZW1vcnlfaGFuZGxlGAMgASgEIigKD0Nvbm5lY3RSZXNwb25zZRIVCg1wcmVzZW50ZXJfcGlkGAEgASgNInEKEVNoYXJlZFN1cmZhY2VJbmZvEg0KBXdpZHRoGAEgASgNEg4KBmhlaWdodBgCIAEoDRIOCgZmb3JtYXQYAyABKA0SEwoLbWVtb3J5X3NpemUYBCABKAQSGAoQbWVtb3J5X3R5cGVfYml0cxgFIAEoDSLuAgoKSW5wdXRFdmVudBIuCgxtb3VzZV9tb3Rpb24YASABKAsyFi5ncHVfc2hhcmUuTW91c2VNb3Rpb25IABIuCgxtb3VzZV9idXR0b24YAiABKAsyFi5ncHVfc2hhcmUuTW91c2VCdXR0b25IABIsCgttb3VzZV93aGVlbBgDIAEoCzIVLmdwdV9zaGFyZS5Nb3VzZVdoZWVsSAASJwoIa2V5X2Rvd24YBCABKAsyEy5ncHVfc2hhcmUuS2V5RXZlbnRIABIlCgZrZXlfdXAYBSABKAsyEy5ncHVfc2hhcmUuS2V5RXZlbnRIABIjCgZyZXNpemUYBiABKAsyES5ncHVfc2hhcmUuUmVzaXplSAASKAoJdGFiX3BhdXNlGAcgASgLMhMuZ3B1X3NoYXJlLlRhYlBhdXNlSAASKgoKdGFiX3Jlc3VtZRgIIAEoCzIULmdwdV9zaGFyZS5UYWJSZXN1bWVIAEIHCgVldmVudCIKCghUYWJQYXVzZSILCglUYWJSZXN1bWUiQQoLTW91c2VNb3Rpb24SCQoBeBgBIAEoAhIJCgF5GAIgASgCEg0KBXJlbF94GAMgASgCEg0KBXJlbF95GAQgASgCIkQKC01vdXNlQnV0dG9uEg4KBmJ1dHRvbhgBIAEoDRIPCgdwcmVzc2VkGAIgASgIEgkKAXgYAyABKAISCQoBeRgEIAEoAiIeCgpNb3VzZVdoZWVsEhAKCHNjcm9sbF95GAEgASgCIhwKCEtleUV2ZW50EhAKCHNjYW5jb2RlGAEgASgNIicKBlJlc2l6ZRINCgV3aWR0aBgBIAEoDRIOCgZoZWlnaHQYAiABKA0iVQoNU3VyZmFjZVVwZGF0ZRItCgdzdXJmYWNlGAEgASgLMhwuZ3B1X3NoYXJlLlNoYXJlZFN1cmZhY2VJbmZvEhUKDW1lbW9yeV9oYW5kbGUYAiABKAQiDAoKU3VyZmFjZUFjayIUChJTdHJlYW1JbnB1dFJlcXVlc3Qy4wEKDlJlbmRlcmVyQnJpZGdlEkgKD1JlZ2lzdGVyU3VyZmFjZRIZLmdwdV9zaGFyZS5Db25uZWN0UmVxdWVzdBoaLmdwdV9zaGFyZS5Db25uZWN0UmVzcG9uc2USRQoLU3RyZWFtSW5wdXQSHS5ncHVfc2hhcmUuU3RyZWFtSW5wdXRSZXF1ZXN0GhUuZ3B1X3NoYXJlLklucHV0RXZlbnQwARJACg1Ob3RpZnlTdXJmYWNlEhguZ3B1X3NoYXJlLlN1cmZhY2VVcGRhdGUaFS5ncHVfc2hhcmUuU3VyZmFjZUFja2IGcHJvdG8z");
 
 /**
  * Describes the message gpu_share.ConnectRequest.
@@ -39,60 +39,74 @@ export const InputEventSchema = /*@__PURE__*/
   messageDesc(file_gpu_share, 3);
 
 /**
+ * Describes the message gpu_share.TabPause.
+ * Use `create(TabPauseSchema)` to create a new message.
+ */
+export const TabPauseSchema = /*@__PURE__*/
+  messageDesc(file_gpu_share, 4);
+
+/**
+ * Describes the message gpu_share.TabResume.
+ * Use `create(TabResumeSchema)` to create a new message.
+ */
+export const TabResumeSchema = /*@__PURE__*/
+  messageDesc(file_gpu_share, 5);
+
+/**
  * Describes the message gpu_share.MouseMotion.
  * Use `create(MouseMotionSchema)` to create a new message.
  */
 export const MouseMotionSchema = /*@__PURE__*/
-  messageDesc(file_gpu_share, 4);
+  messageDesc(file_gpu_share, 6);
 
 /**
  * Describes the message gpu_share.MouseButton.
  * Use `create(MouseButtonSchema)` to create a new message.
  */
 export const MouseButtonSchema = /*@__PURE__*/
-  messageDesc(file_gpu_share, 5);
+  messageDesc(file_gpu_share, 7);
 
 /**
  * Describes the message gpu_share.MouseWheel.
  * Use `create(MouseWheelSchema)` to create a new message.
  */
 export const MouseWheelSchema = /*@__PURE__*/
-  messageDesc(file_gpu_share, 6);
+  messageDesc(file_gpu_share, 8);
 
 /**
  * Describes the message gpu_share.KeyEvent.
  * Use `create(KeyEventSchema)` to create a new message.
  */
 export const KeyEventSchema = /*@__PURE__*/
-  messageDesc(file_gpu_share, 7);
+  messageDesc(file_gpu_share, 9);
 
 /**
  * Describes the message gpu_share.Resize.
  * Use `create(ResizeSchema)` to create a new message.
  */
 export const ResizeSchema = /*@__PURE__*/
-  messageDesc(file_gpu_share, 8);
+  messageDesc(file_gpu_share, 10);
 
 /**
  * Describes the message gpu_share.SurfaceUpdate.
  * Use `create(SurfaceUpdateSchema)` to create a new message.
  */
 export const SurfaceUpdateSchema = /*@__PURE__*/
-  messageDesc(file_gpu_share, 9);
+  messageDesc(file_gpu_share, 11);
 
 /**
  * Describes the message gpu_share.SurfaceAck.
  * Use `create(SurfaceAckSchema)` to create a new message.
  */
 export const SurfaceAckSchema = /*@__PURE__*/
-  messageDesc(file_gpu_share, 10);
+  messageDesc(file_gpu_share, 12);
 
 /**
  * Describes the message gpu_share.StreamInputRequest.
  * Use `create(StreamInputRequestSchema)` to create a new message.
  */
 export const StreamInputRequestSchema = /*@__PURE__*/
-  messageDesc(file_gpu_share, 11);
+  messageDesc(file_gpu_share, 13);
 
 /**
  * @generated from service gpu_share.RendererBridge

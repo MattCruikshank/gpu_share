@@ -95,18 +95,18 @@ if(CARGO_EXE)
         add_dependencies(deno_renderer protoc)
     endif()
 
-    # Copy JS/TS files next to the binary so it can find them
+    # Copy JS/TS files and scenes next to the binary so it can find them
     add_custom_command(TARGET deno_renderer POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            "${CMAKE_SOURCE_DIR}/deno_renderer/scene.ts"
-            "${CMAKE_SOURCE_DIR}/deno_renderer/target/${CARGO_OUTPUT_DIR}/scene.ts"
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
             "${CMAKE_SOURCE_DIR}/deno_renderer/v8_polyfill.js"
             "${CMAKE_SOURCE_DIR}/deno_renderer/target/${CARGO_OUTPUT_DIR}/v8_polyfill.js"
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
             "${CMAKE_SOURCE_DIR}/deno_renderer/proto_bundle.js"
             "${CMAKE_SOURCE_DIR}/deno_renderer/target/${CARGO_OUTPUT_DIR}/proto_bundle.js"
-        COMMENT "Copying scene.ts, v8_polyfill.js, and proto_bundle.js to cargo output"
+        COMMAND ${CMAKE_COMMAND} -E copy_directory
+            "${CMAKE_SOURCE_DIR}/deno_renderer/scenes"
+            "${CMAKE_SOURCE_DIR}/deno_renderer/target/${CARGO_OUTPUT_DIR}/scenes"
+        COMMENT "Copying JS runtime files and scenes to cargo output"
     )
 else()
     message(STATUS "cargo not found — skipping deno_renderer (install Rust from https://rustup.rs)")

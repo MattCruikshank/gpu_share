@@ -1211,11 +1211,11 @@ fn main() {
     if script_path.is_empty() {
         if let Ok(exe_path) = std::env::current_exe() {
             if let Some(dir) = exe_path.parent() {
-                script_path = dir.join("scene.ts").to_string_lossy().to_string();
+                script_path = dir.join("scenes").join("1.ts").to_string_lossy().to_string();
             }
         }
         if script_path.is_empty() {
-            script_path = "scene.ts".to_string();
+            script_path = "scenes/1.ts".to_string();
         }
     }
 
@@ -1553,6 +1553,7 @@ fn main() {
             eprintln!("[deno_renderer] Entering render loop (Ctrl+C to exit)...");
 
             let start_time = std::time::Instant::now();
+            let mut tab_paused = false;
 
             while running.load(Ordering::Relaxed) {
                 // Poll for input events from gRPC stream (non-blocking channel drain)
@@ -1562,9 +1563,20 @@ fn main() {
 
                     // eprintln!("[render_loop] Got event: {:?}", ev.event);
 
-                    // Check for resize (needs Vulkan handling in Rust)
-                    if let Some(Event::Resize(r)) = &ev.event {
-                        resize_event = Some((r.width, r.height));
+                    match &ev.event {
+                        // Check for resize (needs Vulkan handling in Rust)
+                        Some(Event::Resize(r)) => {
+                            resize_event = Some((r.width, r.height));
+                        }
+                        Some(Event::TabPause(_)) => {
+                            tab_paused = true;
+                            eprintln!("[deno_renderer] Tab paused");
+                        }
+                        Some(Event::TabResume(_)) => {
+                            tab_paused = false;
+                            eprintln!("[deno_renderer] Tab resumed");
+                        }
+                        _ => {}
                     }
 
                     // Encode raw protobuf bytes for TypeScript consumption
@@ -1649,9 +1661,10 @@ fn main() {
                     }
                 }
 
-                // Target ~60fps — must use tokio::time::sleep (not std::thread::sleep)
-                // so the single-threaded tokio runtime can poll the StreamInput task.
-                tokio::time::sleep(Duration::from_millis(16)).await;
+                // Must use tokio::time::sleep (not std::thread::sleep) so the
+                // single-threaded tokio runtime can poll the StreamInput task.
+                let sleep_ms = if tab_paused { 500 } else { 16 }; // ~2fps when paused, ~60fps active
+                tokio::time::sleep(Duration::from_millis(sleep_ms)).await;
             }
 
             // Cleanup cmd_buf and fence inside the block where they were created

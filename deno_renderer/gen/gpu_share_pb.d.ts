@@ -142,6 +142,18 @@ export declare type InputEvent = Message<"gpu_share.InputEvent"> & {
      */
     value: Resize;
     case: "resize";
+  } | {
+    /**
+     * @generated from field: gpu_share.TabPause tab_pause = 7;
+     */
+    value: TabPause;
+    case: "tabPause";
+  } | {
+    /**
+     * @generated from field: gpu_share.TabResume tab_resume = 8;
+     */
+    value: TabResume;
+    case: "tabResume";
   } | { case: undefined; value?: undefined };
 };
 
@@ -150,6 +162,34 @@ export declare type InputEvent = Message<"gpu_share.InputEvent"> & {
  * Use `create(InputEventSchema)` to create a new message.
  */
 export declare const InputEventSchema: GenMessage<InputEvent>;
+
+/**
+ * Sent when this tab goes to background — renderer should reduce frame rate.
+ *
+ * @generated from message gpu_share.TabPause
+ */
+export declare type TabPause = Message<"gpu_share.TabPause"> & {
+};
+
+/**
+ * Describes the message gpu_share.TabPause.
+ * Use `create(TabPauseSchema)` to create a new message.
+ */
+export declare const TabPauseSchema: GenMessage<TabPause>;
+
+/**
+ * Sent when this tab comes to foreground — renderer should resume full frame rate.
+ *
+ * @generated from message gpu_share.TabResume
+ */
+export declare type TabResume = Message<"gpu_share.TabResume"> & {
+};
+
+/**
+ * Describes the message gpu_share.TabResume.
+ * Use `create(TabResumeSchema)` to create a new message.
+ */
+export declare const TabResumeSchema: GenMessage<TabResume>;
 
 /**
  * @generated from message gpu_share.MouseMotion

@@ -32,6 +32,8 @@ public:
     void pushKeyDown(uint32_t scancode);
     void pushKeyUp(uint32_t scancode);
     void pushResize(uint32_t width, uint32_t height);
+    void pushTabPause();
+    void pushTabResume();
 
     // Poll for surface updates from the renderer (after resize).
     // Returns true if a new surface is available.

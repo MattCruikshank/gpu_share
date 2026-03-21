@@ -40,8 +40,16 @@ message InputEvent {
     KeyEvent      key_down = 4;
     KeyEvent      key_up = 5;
     Resize        resize = 6;
+    TabPause      tab_pause = 7;
+    TabResume     tab_resume = 8;
   }
 }
+
+// Sent when this tab goes to background — renderer should reduce frame rate.
+message TabPause {}
+
+// Sent when this tab comes to foreground — renderer should resume full frame rate.
+message TabResume {}
 
 message MouseMotion {
   float x = 1;
