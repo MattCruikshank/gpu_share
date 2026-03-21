@@ -13,6 +13,9 @@
 #include <memory>
 #include <chrono>
 #include <thread>
+#include <queue>
+#include <mutex>
+#include <atomic>
 
 #ifdef _WIN32
     #include <windows.h>
@@ -23,7 +26,9 @@
 
 #include "shared/shared_handle.h"
 #include "shared/input_event.h"
-#include "handle_transport/handle_transport.h"
+
+#include <grpcpp/grpcpp.h>
+#include "gpu_share.grpc.pb.h"
 
 #define VK_CHECK(call) do { \
     VkResult result_ = (call); \
@@ -160,7 +165,7 @@ static VkPipelineLayout  g_pipelineLayout = VK_NULL_HANDLE;
 static VkPipeline        g_pipeline       = VK_NULL_HANDLE;
 static VkShaderModule    g_vertModule     = VK_NULL_HANDLE;
 static VkShaderModule    g_fragModule     = VK_NULL_HANDLE;
-static HandleTransport*  g_transport      = nullptr;
+// gRPC client — managed in main(), no global needed
 
 // Function pointer for exporting memory handles (loaded once in main)
 #ifdef _WIN32
@@ -187,7 +192,6 @@ struct SharedImage {
 #ifdef _WIN32
 static BOOL WINAPI consoleHandler(DWORD) {
     g_running = 0;
-    if (g_transport) g_transport->cancel();
     return TRUE;
 }
 #else
@@ -776,35 +780,71 @@ int main(int argc, char* argv[]) {
     fprintf(stderr, "[test_renderer] Graphics pipeline created\n");
 
     // -----------------------------------------------------------------------
-    // 12. Listen on socket and accept presenter connection
+    // 12. Connect to presenter via gRPC
     // -----------------------------------------------------------------------
-    auto transport = HandleTransport::create();
-    g_transport = transport.get();
-    if (!transport->listen(port)) {
-        fprintf(stderr, "Failed to listen on %s\n", port.c_str());
+    fprintf(stderr, "[test_renderer] Connecting to presenter gRPC on %s...\n", port.c_str());
+
+    std::shared_ptr<grpc::Channel> channel;
+    std::unique_ptr<gpu_share::RendererBridge::Stub> stub;
+
+    // Retry connection (presenter may still be starting)
+    bool connected = false;
+    for (int attempt = 0; attempt < 20; attempt++) {
+        channel = grpc::CreateChannel("127.0.0.1:" + port, grpc::InsecureChannelCredentials());
+        stub = gpu_share::RendererBridge::NewStub(channel);
+
+        // Send Connect RPC with our surface info and memory handle
+        gpu_share::ConnectRequest req;
+        req.set_renderer_pid(
+#ifdef _WIN32
+            GetCurrentProcessId()
+#else
+            static_cast<uint32_t>(getpid())
+#endif
+        );
+        auto* si = req.mutable_surface();
+        si->set_width(sharedImg.width);
+        si->set_height(sharedImg.height);
+        si->set_format(imageFormat);
+        si->set_memory_size(sharedImg.memorySize);
+        si->set_memory_type_bits(sharedImg.memoryTypeBits);
+        req.set_memory_handle(static_cast<uint64_t>(sharedImg.handle));
+
+        gpu_share::ConnectResponse resp;
+        grpc::ClientContext ctx;
+        grpc::Status status = stub->RegisterSurface(&ctx, req, &resp);
+        if (status.ok()) {
+            fprintf(stderr, "[test_renderer] Connected to presenter (pid=%u)\n",
+                    resp.presenter_pid());
+            connected = true;
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    }
+    if (!connected) {
+        fprintf(stderr, "Failed to connect to presenter gRPC\n");
         return 1;
     }
 
-    fprintf(stderr, "[test_renderer] Waiting for presenter to connect on %s...\n", port.c_str());
+    // Start StreamInput in a background thread to receive events
+    std::queue<gpu_share::InputEvent> eventQueue;
+    std::mutex eventMu;
+    std::atomic<bool> streamDone{false};
 
-    if (!transport->accept()) {
-        fprintf(stderr, "Failed to accept connection\n");
-        return 1;
-    }
-    fprintf(stderr, "[test_renderer] Presenter connected\n");
+    auto streamThread = std::thread([&stub, &eventQueue, &eventMu, &streamDone]() {
+        grpc::ClientContext ctx;
+        gpu_share::StreamInputRequest req;
+        auto reader = stub->StreamInput(&ctx, req);
 
-    SharedSurfaceInfo surfaceInfo{};
-    surfaceInfo.width          = sharedImg.width;
-    surfaceInfo.height         = sharedImg.height;
-    surfaceInfo.format         = imageFormat;
-    surfaceInfo.memorySize     = sharedImg.memorySize;
-    surfaceInfo.memoryTypeBits = sharedImg.memoryTypeBits;
+        gpu_share::InputEvent ev;
+        while (reader->Read(&ev)) {
+            std::lock_guard<std::mutex> lk(eventMu);
+            eventQueue.push(std::move(ev));
+        }
+        streamDone.store(true);
+    });
 
-    if (!transport->sendHandle(sharedImg.handle, &surfaceInfo, sizeof(surfaceInfo))) {
-        fprintf(stderr, "Failed to send handle\n");
-        return 1;
-    }
-    fprintf(stderr, "[test_renderer] Surface shared, handle sent. Starting render loop.\n");
+    fprintf(stderr, "[test_renderer] Surface shared via gRPC. Starting render loop.\n");
 
     // -----------------------------------------------------------------------
     // 13. Allocate command buffer and fence for render loop
@@ -841,46 +881,54 @@ int main(int argc, char* argv[]) {
     fprintf(stderr, "[test_renderer] Controls: drag=rotate, scroll=zoom, space=pause\n");
 
     while (g_running) {
-        // Poll for input events from presenter (non-blocking)
-        InputEvent ie{};
-        size_t bytesRead = 0;
-        while (transport->recvDataNonBlocking(&ie, sizeof(ie), bytesRead) &&
-               bytesRead == sizeof(ie)) {
-            switch (ie.type) {
-                case InputEventType::MouseMotion:
-                    dragAngleOffset += ie.motion.relX * 0.01f;
-                    break;
-                case InputEventType::MouseWheel:
-                    scale *= (ie.wheel.scrollY > 0) ? 1.1f : 0.9f;
-                    scale = (scale < 0.1f) ? 0.1f : (scale > 10.0f) ? 10.0f : scale;
-                    break;
-                case InputEventType::KeyDown:
-                    // SDL scancode for space is 44
-                    if (ie.key.scancode == 44) paused = !paused;
-                    break;
-                case InputEventType::Resize: {
-                    uint32_t newW = ie.resize.width;
-                    uint32_t newH = ie.resize.height;
-                    if (newW > 0 && newH > 0 && (newW != sharedImg.width || newH != sharedImg.height)) {
-                        vkDeviceWaitIdle(g_device);
-                        destroySharedImage(g_device, sharedImg);
-                        sharedImg = createSharedImage(g_device, physDev, g_renderPass, newW, newH, imageFormat);
+        // Poll for input events from gRPC StreamInput (non-blocking queue drain)
+        {
+            std::lock_guard<std::mutex> lk(eventMu);
+            while (!eventQueue.empty()) {
+                auto ev = std::move(eventQueue.front());
+                eventQueue.pop();
 
-                        // Send new surface to presenter
-                        SharedSurfaceInfo si{};
-                        si.width = sharedImg.width;
-                        si.height = sharedImg.height;
-                        si.format = imageFormat;
-                        si.memorySize = sharedImg.memorySize;
-                        si.memoryTypeBits = sharedImg.memoryTypeBits;
-                        transport->sendHandle(sharedImg.handle, &si, sizeof(si));
+                switch (ev.event_case()) {
+                    case gpu_share::InputEvent::kMouseMotion:
+                        dragAngleOffset += ev.mouse_motion().rel_x() * 0.01f;
+                        break;
+                    case gpu_share::InputEvent::kMouseWheel:
+                        scale *= (ev.mouse_wheel().scroll_y() > 0) ? 1.1f : 0.9f;
+                        scale = (scale < 0.1f) ? 0.1f : (scale > 10.0f) ? 10.0f : scale;
+                        break;
+                    case gpu_share::InputEvent::kKeyDown:
+                        // SDL scancode for space is 44
+                        if (ev.key_down().scancode() == 44) paused = !paused;
+                        break;
+                    case gpu_share::InputEvent::kResize: {
+                        uint32_t newW = ev.resize().width();
+                        uint32_t newH = ev.resize().height();
+                        if (newW > 0 && newH > 0 && (newW != sharedImg.width || newH != sharedImg.height)) {
+                            vkDeviceWaitIdle(g_device);
+                            destroySharedImage(g_device, sharedImg);
+                            sharedImg = createSharedImage(g_device, physDev, g_renderPass, newW, newH, imageFormat);
 
-                        fprintf(stderr, "[test_renderer] Resized to %ux%u\n", newW, newH);
+                            // Send new surface to presenter via NotifySurface RPC
+                            gpu_share::SurfaceUpdate update;
+                            auto* si = update.mutable_surface();
+                            si->set_width(sharedImg.width);
+                            si->set_height(sharedImg.height);
+                            si->set_format(imageFormat);
+                            si->set_memory_size(sharedImg.memorySize);
+                            si->set_memory_type_bits(sharedImg.memoryTypeBits);
+                            update.set_memory_handle(static_cast<uint64_t>(sharedImg.handle));
+
+                            gpu_share::SurfaceAck ack;
+                            grpc::ClientContext rctx;
+                            stub->NotifySurface(&rctx, update, &ack);
+
+                            fprintf(stderr, "[test_renderer] Resized to %ux%u\n", newW, newH);
+                        }
+                        break;
                     }
-                    break;
+                    default:
+                        break;
                 }
-                default:
-                    break;
             }
         }
 
@@ -981,7 +1029,10 @@ int main(int argc, char* argv[]) {
     // -----------------------------------------------------------------------
     // 15. Cleanup
     // -----------------------------------------------------------------------
-    transport->close();
+    // The gRPC stream reader thread will exit when the channel closes
+    if (streamThread.joinable()) {
+        streamThread.detach();  // channel closes when stub is destroyed
+    }
 
     vkDestroyFence(g_device, fence, nullptr);
     vkFreeCommandBuffers(g_device, g_commandPool, 1, &cmdBuf);

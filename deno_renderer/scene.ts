@@ -2,6 +2,10 @@
 // TypeScript defines shaders, pipelines, and draw calls.
 // Rust renders each frame to the shared exportable VkImage.
 // Per-frame callback enables interactive input handling.
+//
+// Input events arrive as raw protobuf bytes from the gRPC stream.
+// proto_bundle.js (loaded before this script) provides globalThis.proto
+// with decodeEvents() and InputEventSchema.
 
 const {
   op_gpu_create_shader_module,
@@ -12,6 +16,12 @@ const {
   op_gpu_set_rotation,
   op_log,
 } = Deno.core.ops;
+
+// proto is set by proto_bundle.js on globalThis
+declare const proto: {
+  decodeEvents(buf: Uint8Array): any[];
+  InputEventSchema: any;
+};
 
 op_log("Scene script loaded — setting up WebGPU pipeline");
 
@@ -75,25 +85,28 @@ if (shader === 0xFFFFFFFF) {
     let scale = 1.0;
     let dragging = false;
 
-    globalThis.__frame = (elapsed) => {
-      const events = JSON.parse(op_gpu_poll_events());
+    globalThis.__frame = (elapsed: number) => {
+      // op_gpu_poll_events returns length-prefixed protobuf bytes
+      const rawBuf = op_gpu_poll_events();
+      const events = proto.decodeEvents(rawBuf);
 
       for (const ev of events) {
-        switch (ev.type) {
-          case "mouse_button":
-            dragging = ev.pressed === 1 && ev.button === 1;
+        // ev.event is a oneof — ev.event.case tells you which variant
+        switch (ev.event.case) {
+          case "mouseButton":
+            dragging = ev.event.value.pressed && ev.event.value.button === 1;
             break;
-          case "mouse_motion":
+          case "mouseMotion":
             if (dragging) {
-              dragAngle += ev.dx * 0.01;
+              dragAngle += ev.event.value.relX * 0.01;
             }
             break;
-          case "mouse_wheel":
-            scale *= ev.dy > 0 ? 1.1 : 0.9;
+          case "mouseWheel":
+            scale *= ev.event.value.scrollY > 0 ? 1.1 : 0.9;
             scale = Math.max(0.1, Math.min(10.0, scale));
             break;
-          case "key_down":
-            if (ev.scancode === 44) { // space
+          case "keyDown":
+            if (ev.event.value.scancode === 44) { // space
               speed = speed === 0 ? 1.0 : 0;
             }
             break;

@@ -4,6 +4,7 @@ project(gpu-share LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+add_subdirectory(proto)
 add_subdirectory(presenter)
 add_subdirectory(test_renderer)
 
@@ -29,19 +30,26 @@ if(CARGO_EXE)
         set(DENO_RENDERER_EXE "${CMAKE_SOURCE_DIR}/deno_renderer/target/${CARGO_OUTPUT_DIR}/deno_renderer")
     endif()
 
+    # deno_renderer's build.rs needs protoc for tonic codegen
+    find_program(PROTOC_EXE protoc)
+
     add_custom_target(deno_renderer ALL
-        COMMAND ${CARGO_EXE} build ${CARGO_BUILD_FLAG}
+        COMMAND ${CMAKE_COMMAND} -E env "PROTOC=${PROTOC_EXE}"
+            ${CARGO_EXE} build ${CARGO_BUILD_FLAG}
             --manifest-path "${CMAKE_SOURCE_DIR}/deno_renderer/Cargo.toml"
         COMMENT "Building deno_renderer (Rust/cargo)"
         BYPRODUCTS ${DENO_RENDERER_EXE}
     )
 
-    # Copy scene.ts next to the binary so it can find it
+    # Copy scene.ts and proto_bundle.js next to the binary so it can find them
     add_custom_command(TARGET deno_renderer POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
             "${CMAKE_SOURCE_DIR}/deno_renderer/scene.ts"
             "${CMAKE_SOURCE_DIR}/deno_renderer/target/${CARGO_OUTPUT_DIR}/scene.ts"
-        COMMENT "Copying scene.ts to cargo output"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${CMAKE_SOURCE_DIR}/deno_renderer/proto_bundle.js"
+            "${CMAKE_SOURCE_DIR}/deno_renderer/target/${CARGO_OUTPUT_DIR}/proto_bundle.js"
+        COMMENT "Copying scene.ts and proto_bundle.js to cargo output"
     )
 else()
     message(STATUS "cargo not found — skipping deno_renderer (install Rust from https://rustup.rs)")

@@ -9,59 +9,66 @@ The long-term vision is a platform where untrusted/sandboxed renderers (potentia
 ## Architecture
 
 ```
-Presenter (C++, SDL3 + Vulkan)
+Presenter (C++, SDL3 + Vulkan, gRPC server)
     |
-    |  TCP 127.0.0.1:9710
-    |  - PID exchange after connect
-    |  - SharedSurfaceInfo + Vulkan memory handle (fd/HANDLE)
-    |  - InputEvent stream (keyboard, mouse, scroll, resize)
+    |  gRPC 127.0.0.1:9710 (RendererBridge service)
+    |  - RegisterSurface: renderer sends PID + SharedSurfaceInfo + memory handle
+    |  - StreamInput: server-streams InputEvent (keyboard, mouse, scroll, resize)
+    |  - NotifySurface: renderer sends updated surface after resize
     |
-    +--- test_renderer (C++, embedded SPIR-V triangle)
+    +--- test_renderer (C++, gRPC client, embedded SPIR-V triangle)
     |    or
-    +--- deno_renderer (Rust + deno_core, WGSL shaders from TypeScript)
+    +--- deno_renderer (Rust + deno_core, gRPC client via tonic, WGSL from TypeScript)
 ```
 
-### Handle passing over TCP
-- **Linux**: sender sends raw fd as uint64, receiver clones via `pidfd_open` + `pidfd_getfd` (kernel 5.6+)
-- **Windows**: sender calls `DuplicateHandle` into remote process, sends duplicated handle value as uint64
+### gRPC transport (`proto/gpu_share.proto`)
+- Proto3 schema defines all messages and the `RendererBridge` service
+- C++ code generated via protoc + grpc_cpp_plugin (system packages)
+- Rust code generated via tonic-prost-build in `deno_renderer/build.rs`
+- Protobuf `InputEvent` uses `oneof` for typed event variants — no more raw byte casting
+
+### Handle passing over gRPC
+- Memory handles are passed as `uint64` fields in protobuf messages
+- **Linux**: receiver clones via `pidfd_open` + `pidfd_getfd` (kernel 5.6+)
+- **Windows**: sender calls `DuplicateHandle` into remote process, sends duplicated handle value
 
 ### Key data structures
-- `SharedSurfaceInfo` (shared/shared_handle.h) — 20 bytes, image dimensions + format + memory info
-- `InputEvent` (shared/input_event.h) — 20 bytes, tagged union for mouse/keyboard/scroll/resize
-- Both must match exactly between C++ and Rust (verified by compile-time size asserts)
+- `SharedSurfaceInfo` — defined in both `proto/gpu_share.proto` (wire format) and `shared/shared_handle.h` (internal Vulkan use)
+- `InputEvent` — defined in `proto/gpu_share.proto` as a `oneof` with typed message variants
+- Old C ABI structs in `shared/input_event.h` are no longer used on the wire
 
 ## What exists today
 
 ### Presenter (`presenter/`)
-- C++17, SDL3 + Vulkan
+- C++17, SDL3 + Vulkan, gRPC server (`grpc_server.h/cpp`)
 - Creates window, Vulkan swapchain, imports shared VkImage from renderer
 - Blits renderer's image to swapchain each frame
-- Forwards SDL input events to renderer via TCP
+- gRPC `RendererBridge` service streams input events to renderer
 - Spawns renderer as child process, terminates on exit
 - Handles window resize (recreates swapchain, tells renderer to resize shared image)
 - `--deno` flag selects deno_renderer, default is test_renderer
-- `--no-spawn` for manual renderer launch, `--port` to override TCP port
+- `--no-spawn` for manual renderer launch, `--port` to override gRPC port
 
 ### Test renderer (`test_renderer/`)
-- C++17, headless Vulkan
+- C++17, headless Vulkan, gRPC client
 - Spinning RGB triangle with embedded SPIR-V shaders (compiled from GLSL)
 - Full graphics pipeline with push constants (angle, aspect ratio, scale)
 - Interactive: mouse drag rotates, scroll zooms, space pauses
-- Handles resize events from presenter
+- Receives typed protobuf InputEvents via StreamInput server-stream
+- Handles resize via NotifySurface RPC
 
 ### Deno renderer (`deno_renderer/`)
-- Rust, headless Vulkan via ash, TypeScript via deno_core (V8)
+- Rust, headless Vulkan via ash, TypeScript via deno_core (V8), gRPC client via tonic
 - WGSL shader compilation via naga (same compiler wgpu/WebGPU uses)
 - TypeScript (`scene.ts`) defines shaders, creates pipelines, handles input per-frame
 - WebGPU-shaped ops: `op_gpu_create_shader_module`, `op_gpu_create_render_pipeline`, `op_gpu_draw`, `op_gpu_poll_events`, `op_gpu_set_rotation`, etc.
 - Per-frame JS callback (`globalThis.__frame`) receives elapsed time, polls input events
-- Reader thread + mpsc channel for reliable TCP event delivery
+- Typed protobuf events received via tokio mpsc channel from StreamInput background task
 - Cross-platform: Linux + Windows (Vulkan external memory fd/win32)
 
-### Transport (`handle_transport/`)
-- Unified TCP implementation for both platforms
-- Single file: `handle_transport_tcp.cpp`
-- PID exchange, handle passing, plain data send/recv, non-blocking recv, cancellable accept
+### Transport (legacy: `handle_transport/`)
+- Old TCP implementation, no longer compiled into any target
+- Kept for reference; superseded by gRPC
 
 ### Godot GDExtension scaffolding (`renderer_extension/`)
 - Scaffolded but not yet integrated
@@ -69,7 +76,7 @@ Presenter (C++, SDL3 + Vulkan)
 
 ## Build
 
-Requires: Vulkan SDK, CMake 3.25+, C++17 compiler. Rust toolchain for deno_renderer.
+Requires: Vulkan SDK, CMake 3.25+, C++17 compiler, libgrpc++-dev, protobuf-compiler-grpc. Rust toolchain + protoc for deno_renderer.
 
 ```bash
 # Everything (C++ + Rust if cargo is on PATH)
@@ -95,7 +102,6 @@ build/presenter/Debug/presenter.exe --deno
 - Godot 4.x renderer integration via the GDExtension
 
 ### Medium-term
-- gRPC control plane (replace raw TCP for production use)
 - Renderer crash recovery (detect dead process, show placeholder, re-launch)
 - Resize debouncing (coalesce rapid resize events)
 - Hot-reload TypeScript scene scripts without restarting
@@ -109,6 +115,7 @@ build/presenter/Debug/presenter.exe --deno
 ## Conventions
 - C++ code uses `VK_CHECK` macro for Vulkan errors
 - Rust code uses `ash` for Vulkan, `naga` for WGSL compilation, `deno_core` for V8
-- TCP port 9710 is the default for all components
+- gRPC port 9710 is the default for all components
 - `--port` / `-p` overrides it everywhere
+- Proto schema is the single source of truth for wire types (`proto/gpu_share.proto`)
 - Presenter auto-finds renderer executables relative to itself or the working directory

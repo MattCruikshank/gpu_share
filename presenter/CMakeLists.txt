@@ -22,7 +22,7 @@ add_executable(presenter
     vulkan_context.cpp
     surface_import.cpp
     compositor.cpp
-    ../handle_transport/handle_transport_tcp.cpp
+    grpc_server.cpp
 )
 
 target_include_directories(presenter PRIVATE
@@ -30,9 +30,9 @@ target_include_directories(presenter PRIVATE
 )
 
 if(TARGET SDL3::SDL3-static)
-    target_link_libraries(presenter PRIVATE Vulkan::Vulkan SDL3::SDL3-static)
+    target_link_libraries(presenter PRIVATE Vulkan::Vulkan SDL3::SDL3-static gpu_share_proto)
 else()
-    target_link_libraries(presenter PRIVATE Vulkan::Vulkan SDL3::SDL3)
+    target_link_libraries(presenter PRIVATE Vulkan::Vulkan SDL3::SDL3 gpu_share_proto)
 endif()
 
 if(WIN32)

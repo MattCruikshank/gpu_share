@@ -2,11 +2,10 @@ find_package(Vulkan REQUIRED)
 
 add_executable(test_renderer
     main.cpp
-    ../handle_transport/handle_transport_tcp.cpp
 )
 
 target_include_directories(test_renderer PRIVATE ${CMAKE_SOURCE_DIR})
-target_link_libraries(test_renderer PRIVATE Vulkan::Vulkan)
+target_link_libraries(test_renderer PRIVATE Vulkan::Vulkan gpu_share_proto)
 target_compile_features(test_renderer PRIVATE cxx_std_17)
 
 if(WIN32)

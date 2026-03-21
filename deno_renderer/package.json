@@ -1,0 +1,15 @@
+{
+  "name": "deno_renderer",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "proto:gen": "protoc --proto_path=../proto --es_out=gen --plugin=protoc-gen-es=node_modules/.bin/protoc-gen-es ../proto/gpu_share.proto",
+    "proto:bundle": "npx esbuild proto_entry.js --bundle --format=iife --outfile=proto_bundle.js --platform=neutral --target=es2020",
+    "proto": "npm run proto:gen && npm run proto:bundle"
+  },
+  "dependencies": {
+    "@bufbuild/protobuf": "^2.11.0",
+    "@bufbuild/protoc-gen-es": "^2.11.0",
+    "esbuild": "^0.27.4"
+  }
+}

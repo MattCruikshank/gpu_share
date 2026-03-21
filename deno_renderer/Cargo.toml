@@ -9,6 +9,13 @@ deno_core = "0.393"
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
 naga = { version = "24", features = ["wgsl-in", "spv-out"] }
+tonic = "0.14"
+prost = "0.14"
+tonic-prost = "0.14"
+
+[build-dependencies]
+tonic-build = "0.14"
+tonic-prost-build = "0.14"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

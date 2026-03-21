@@ -1,9 +1,8 @@
 #include "vulkan_context.h"
 #include "surface_import.h"
 #include "compositor.h"
-#include "../handle_transport/handle_transport.h"
+#include "grpc_server.h"
 #include "../shared/shared_handle.h"
-#include "../shared/input_event.h"
 
 #include <SDL3/SDL.h>
 #include <cstdio>
@@ -59,8 +58,6 @@ struct ChildProcess {
         }
         if (pid == 0) {
             // Child — parse args and exec
-            // Simple: just pass --port <value> via execlp
-            // args is expected to be "--port <value>"
             std::string portArg;
             auto pos = args.find("--port ");
             if (pos != std::string::npos) {
@@ -131,7 +128,7 @@ static std::string findExe(const char* presenterArgv0, const std::string& name) 
 
     // Cargo build: walk up from exe dir to find <root>/<name>/target/debug/<name>
     if (lastSep != std::string::npos) {
-        std::string sep(1, path[lastSep]); // use same separator as the path
+        std::string sep(1, path[lastSep]);
         std::string dir = path.substr(0, lastSep);
         for (int i = 0; i < 5; i++) {
             candidate = dir + sep + name + sep + "target" + sep + "debug" + sep + name + ext;
@@ -157,10 +154,6 @@ static std::string findExe(const char* presenterArgv0, const std::string& name) 
 
     // Fallback
     return name + ext;
-}
-
-static void forwardEvent(HandleTransport* t, const InputEvent& ev) {
-    t->sendData(&ev, sizeof(ev));
 }
 
 int main(int argc, char* argv[]) {
@@ -211,6 +204,17 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
+    // Start gRPC server before spawning renderer
+    GrpcBridge bridge;
+    uint16_t portNum = static_cast<uint16_t>(std::stoi(port));
+    if (!bridge.start(portNum)) {
+        fprintf(stderr, "Failed to start gRPC server\n");
+        vkCtx.destroy();
+        SDL_DestroyWindow(window);
+        SDL_Quit();
+        return 1;
+    }
+
     // Launch renderer process (unless --no-spawn)
     ChildProcess renderer;
     if (!noSpawn) {
@@ -219,44 +223,21 @@ int main(int argc, char* argv[]) {
                 rendererExe.c_str(), rendererArgs.c_str());
         if (!renderer.spawn(rendererExe, rendererArgs)) {
             fprintf(stderr, "Failed to launch renderer\n");
+            bridge.stop();
             vkCtx.destroy();
             SDL_DestroyWindow(window);
             SDL_Quit();
             return 1;
         }
-        // Give renderer a moment to start listening
-        SDL_Delay(500);
     }
 
-    // Connect to renderer via transport
-    auto transport = HandleTransport::create();
-    fprintf(stderr, "Connecting to renderer at %s...\n", port);
-
-    // Retry connection a few times (renderer may still be starting)
-    bool connected = false;
-    for (int attempt = 0; attempt < 10; attempt++) {
-        if (transport->connect(port)) {
-            connected = true;
-            break;
-        }
-        SDL_Delay(300);
-    }
-    if (!connected) {
-        fprintf(stderr, "Failed to connect to renderer\n");
-        renderer.terminate();
-        vkCtx.destroy();
-        SDL_DestroyWindow(window);
-        SDL_Quit();
-        return 1;
-    }
-    fprintf(stderr, "Connected to renderer\n");
-
-    // Receive shared surface info + memory handle
+    // Wait for renderer to connect via gRPC
     SharedMemoryHandle memoryHandle = kInvalidMemoryHandle;
     SharedSurfaceInfo surfaceInfo{};
-    if (!transport->recvHandle(memoryHandle, &surfaceInfo, sizeof(surfaceInfo))) {
+    fprintf(stderr, "Waiting for renderer to connect via gRPC...\n");
+    if (!bridge.waitForRenderer(memoryHandle, surfaceInfo)) {
         fprintf(stderr, "Failed to receive surface info from renderer\n");
-        transport->close();
+        bridge.stop();
         renderer.terminate();
         vkCtx.destroy();
         SDL_DestroyWindow(window);
@@ -292,58 +273,39 @@ int main(int argc, char* argv[]) {
                 if (hasImportedSurface) {
                     int pw, ph;
                     SDL_GetWindowSizeInPixels(window, &pw, &ph);
-                    InputEvent re{};
-                    re.type = InputEventType::Resize;
-                    re.resize.width = static_cast<uint32_t>(pw);
-                    re.resize.height = static_cast<uint32_t>(ph);
-                    forwardEvent(transport.get(), re);
+                    bridge.pushResize(static_cast<uint32_t>(pw),
+                                      static_cast<uint32_t>(ph));
                 }
             }
 
             // Forward input to renderer
-            InputEvent ie{};
-            bool send = false;
-
             if (event.type == SDL_EVENT_MOUSE_BUTTON_DOWN ||
                 event.type == SDL_EVENT_MOUSE_BUTTON_UP) {
-                ie.type = InputEventType::MouseButton;
-                ie.mouseButton.button = event.button.button;
-                ie.mouseButton.pressed = (event.type == SDL_EVENT_MOUSE_BUTTON_DOWN) ? 1 : 0;
-                ie.mouseButton.x = event.button.x;
-                ie.mouseButton.y = event.button.y;
-                send = true;
-                mouseDragging = (event.type == SDL_EVENT_MOUSE_BUTTON_DOWN &&
-                                 event.button.button == 1);
+                bool pressed = (event.type == SDL_EVENT_MOUSE_BUTTON_DOWN);
+                bridge.pushMouseButton(event.button.button, pressed,
+                                       event.button.x, event.button.y);
+                mouseDragging = (pressed && event.button.button == 1);
             }
             else if (event.type == SDL_EVENT_MOUSE_MOTION && mouseDragging) {
-                ie.type = InputEventType::MouseMotion;
-                ie.motion.x = event.motion.x;
-                ie.motion.y = event.motion.y;
-                ie.motion.relX = event.motion.xrel;
-                ie.motion.relY = event.motion.yrel;
-                send = true;
+                bridge.pushMouseMotion(event.motion.x, event.motion.y,
+                                       event.motion.xrel, event.motion.yrel);
             }
             else if (event.type == SDL_EVENT_MOUSE_WHEEL) {
-                ie.type = InputEventType::MouseWheel;
-                ie.wheel.scrollY = event.wheel.y;
-                send = true;
+                bridge.pushMouseWheel(event.wheel.y);
             }
             else if (event.type == SDL_EVENT_KEY_DOWN || event.type == SDL_EVENT_KEY_UP) {
-                ie.type = (event.type == SDL_EVENT_KEY_DOWN)
-                          ? InputEventType::KeyDown : InputEventType::KeyUp;
-                ie.key.scancode = event.key.scancode;
-                send = true;
-            }
-
-            if (send && hasImportedSurface) {
-                forwardEvent(transport.get(), ie);
+                if (event.type == SDL_EVENT_KEY_DOWN) {
+                    bridge.pushKeyDown(event.key.scancode);
+                } else {
+                    bridge.pushKeyUp(event.key.scancode);
+                }
             }
         }
 
         // Check if renderer sent a new shared surface (after resize)
         SharedMemoryHandle newHandle = kInvalidMemoryHandle;
         SharedSurfaceInfo newInfo{};
-        if (transport->recvHandleNonBlocking(newHandle, &newInfo, sizeof(newInfo))) {
+        if (bridge.pollSurfaceUpdate(newHandle, newInfo)) {
             vkDeviceWaitIdle(vkCtx.getDevice());
             imported.destroy(vkCtx.getDevice());
             imported = importSurface(vkCtx.getDevice(), vkCtx.getPhysicalDevice(),
@@ -383,7 +345,7 @@ int main(int argc, char* argv[]) {
 
     imported.destroy(vkCtx.getDevice());
     vkCtx.destroy();
-    transport->close();
+    bridge.stop();
     renderer.terminate();
     SDL_DestroyWindow(window);
     SDL_Quit();

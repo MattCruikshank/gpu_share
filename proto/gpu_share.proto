@@ -1,0 +1,100 @@
+syntax = "proto3";
+
+package gpu_share;
+
+// ---------------------------------------------------------------------------
+// Surface setup — exchanged once at connection time
+// ---------------------------------------------------------------------------
+
+// Renderer → Presenter: "here's my shared surface"
+message ConnectRequest {
+  uint32 renderer_pid = 1;
+  SharedSurfaceInfo surface = 2;
+  // The raw handle value (fd on Linux, HANDLE on Windows).
+  // Presenter clones via pidfd_open + pidfd_getfd / DuplicateHandle.
+  uint64 memory_handle = 3;
+}
+
+// Presenter → Renderer: "acknowledged, here's my PID"
+message ConnectResponse {
+  uint32 presenter_pid = 1;
+}
+
+message SharedSurfaceInfo {
+  uint32 width = 1;
+  uint32 height = 2;
+  uint32 format = 3;          // VkFormat enum value
+  uint64 memory_size = 4;     // VkDeviceSize
+  uint32 memory_type_bits = 5;
+}
+
+// ---------------------------------------------------------------------------
+// Input events — streamed presenter → renderer
+// ---------------------------------------------------------------------------
+
+message InputEvent {
+  oneof event {
+    MouseMotion   mouse_motion = 1;
+    MouseButton   mouse_button = 2;
+    MouseWheel    mouse_wheel = 3;
+    KeyEvent      key_down = 4;
+    KeyEvent      key_up = 5;
+    Resize        resize = 6;
+  }
+}
+
+message MouseMotion {
+  float x = 1;
+  float y = 2;
+  float rel_x = 3;
+  float rel_y = 4;
+}
+
+message MouseButton {
+  uint32 button = 1;
+  bool pressed = 2;
+  float x = 3;
+  float y = 4;
+}
+
+message MouseWheel {
+  float scroll_y = 1;
+}
+
+message KeyEvent {
+  uint32 scancode = 1;
+}
+
+message Resize {
+  uint32 width = 1;
+  uint32 height = 2;
+}
+
+// ---------------------------------------------------------------------------
+// Surface update — renderer → presenter after resize
+// ---------------------------------------------------------------------------
+
+message SurfaceUpdate {
+  SharedSurfaceInfo surface = 1;
+  uint64 memory_handle = 2;
+}
+
+message SurfaceAck {}
+
+// ---------------------------------------------------------------------------
+// Service
+// ---------------------------------------------------------------------------
+
+service RendererBridge {
+  // Renderer calls this once to share its surface with the presenter.
+  rpc RegisterSurface(ConnectRequest) returns (ConnectResponse);
+
+  // Presenter streams input events to the renderer.
+  rpc StreamInput(StreamInputRequest) returns (stream InputEvent);
+
+  // Renderer calls this after resize to send updated surface info + handle.
+  rpc NotifySurface(SurfaceUpdate) returns (SurfaceAck);
+}
+
+// Empty for now — could carry filter preferences later.
+message StreamInputRequest {}
