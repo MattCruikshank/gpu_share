@@ -7,7 +7,6 @@ edition = "2021"
 ash = { version = "0.38", features = ["linked"] }
 deno_core = "0.393"
 tokio = { version = "1", features = ["full"] }
-serde = { version = "1", features = ["derive"] }
 naga = { version = "24", features = ["wgsl-in", "spv-out"] }
 tonic = "0.14"
 prost = "0.14"

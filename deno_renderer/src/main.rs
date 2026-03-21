@@ -804,7 +804,7 @@ fn op_gpu_set_rotation(state: &mut OpState, drag_angle: f64, speed: f64, scale: 
 
 #[op2(fast)]
 fn op_log(#[string] msg: &str) {
-    eprintln!("[scene.ts] {}", msg);
+    eprintln!("[scene] {}", msg);
 }
 
 // ---------------------------------------------------------------------------
@@ -1125,10 +1125,8 @@ mod transport {
                 let req = gpu_share_proto::StreamInputRequest {};
                 match stream_client.stream_input(req).await {
                     Ok(response) => {
-                        // eprintln!("[transport] StreamInput connected, waiting for events");
                         let mut stream = response.into_inner();
                         while let Ok(Some(ev)) = stream.message().await {
-                            // eprintln!("[transport] Received event: case={:?}", ev.event);
                             if tx.send(ev).is_err() {
                                 break;
                             }
@@ -1579,9 +1577,6 @@ fn main() {
                 let mut resize_event: Option<(u32, u32)> = None;
                 while let Some(ev) = transport.recv_event() {
                     use gpu_share_proto::input_event::Event;
-
-                    // eprintln!("[render_loop] Got event: {:?}", ev.event);
-
                     match &ev.event {
                         // Check for resize (needs Vulkan handling in Rust)
                         Some(Event::Resize(r)) => {

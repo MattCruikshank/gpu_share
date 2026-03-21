@@ -55,15 +55,6 @@ Presenter (C++, SDL3 + Vulkan, multi-tab)
 - Handles window resize (recreates swapchain, tells active renderer to resize)
 - `--port` overrides the base gRPC port (default 9710)
 
-### Test renderer (`test_renderer/`)
-- C++17, headless Vulkan, gRPC client
-- Spinning RGB triangle with embedded SPIR-V shaders (compiled from GLSL)
-- Full graphics pipeline with push constants (angle, aspect ratio, scale)
-- Interactive: mouse drag rotates, scroll zooms, space pauses
-- Receives typed protobuf InputEvents via StreamInput server-stream
-- Handles resize via NotifySurface RPC
-- Not currently integrated into the multi-tab presenter (standalone use only)
-
 ### Deno renderer (`deno_renderer/`)
 - Rust, headless Vulkan via ash, TypeScript via deno_core (V8), gRPC client via tonic
 - WGSL shader compilation via naga (same compiler wgpu/WebGPU uses)
@@ -79,14 +70,6 @@ Presenter (C++, SDL3 + Vulkan, multi-tab)
 ### Scenes (`deno_renderer/scenes/`)
 - `1.ts` — Spinning RGB triangle (mouse drag rotates, scroll zooms, space pauses)
 - `2.ts` — Bouncing octagon (space pauses bounce)
-
-### Transport (legacy: `handle_transport/`)
-- Old TCP implementation, no longer compiled into any target
-- Kept for reference; superseded by gRPC
-
-### Godot GDExtension scaffolding (`renderer_extension/`)
-- Scaffolded but not yet integrated
-- Would allow Godot 4.x as a renderer process
 
 ## Build
 
@@ -113,29 +96,22 @@ If vcpkg is not available, CMake falls back to FetchContent (builds gRPC from so
 
 ### Run
 ```bash
-# Presenter opens, press 1-9 to launch tabs
+# Presenter opens, press 1-9 to launch tabs, R to reload, ESC to quit
 build/presenter/Debug/presenter.exe
-
-# Standalone test_renderer (not multi-tab, needs manual --no-spawn presenter)
-build/test_renderer/Debug/test_renderer.exe
 ```
 
 ## What's next
 
 ### Near-term
-- Send resize to all connected tabs (not just active) on window resize
 - Integrate wgpu-core so TypeScript gets the real WebGPU API (not just our custom ops)
   - Use `Global::from_hal_instance()` to wrap our ash Instance
   - `CreateDeviceCallback` to inject external memory extensions
   - `create_texture_from_hal()` to wrap the exportable image as a WebGPU texture
   - TypeScript owns the render loop via `requestAnimationFrame`-style callback
-- Godot 4.x renderer integration via the GDExtension
-- Integrate test_renderer as a tab option (tab 0 or a flag)
 
 ### Medium-term
 - Renderer crash recovery (detect dead process, show placeholder, re-launch)
 - Resize debouncing (coalesce rapid resize events)
-- Hot-reload TypeScript scene scripts without restarting
 - Tab bar UI overlay
 
 ### Long-term

@@ -443,7 +443,6 @@ dependencies = [
  "naga",
  "prost",
  "reqwest",
- "serde",
  "tokio",
  "tonic",
  "tonic-build",

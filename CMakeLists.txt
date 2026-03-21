@@ -11,12 +11,6 @@ endif()
 
 add_subdirectory(proto)
 add_subdirectory(presenter)
-add_subdirectory(test_renderer)
-
-option(BUILD_RENDERER_EXTENSION "Build Godot renderer extension (requires godot-cpp)" OFF)
-if(BUILD_RENDERER_EXTENSION)
-    add_subdirectory(renderer_extension)
-endif()
 
 # Build deno_renderer via cargo if Rust is available
 find_program(CARGO_EXE cargo)
