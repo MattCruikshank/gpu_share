@@ -33,6 +33,13 @@ export declare type ConnectRequest = Message<"gpu_share.ConnectRequest"> & {
    * @generated from field: uint64 memory_handle = 3;
    */
   memoryHandle: bigint;
+
+  /**
+   * Timeline semaphore handle for frame synchronization.
+   *
+   * @generated from field: uint64 semaphore_handle = 4;
+   */
+  semaphoreHandle: bigint;
 };
 
 /**

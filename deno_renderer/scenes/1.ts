@@ -37,25 +37,28 @@ const shaderModule = device.createShaderModule({
     };
 
     @vertex fn vs(@builtin(vertex_index) i: u32) -> VsOutput {
-      var positions = array<vec2f, 3>(
-        vec2f( 0.0, -0.5),
-        vec2f( 0.5,  0.5),
-        vec2f(-0.5,  0.5)
-      );
-      var colors = array<vec3f, 3>(
-        vec3f(1.0, 0.0, 0.0),
-        vec3f(0.0, 1.0, 0.0),
-        vec3f(0.0, 0.0, 1.0),
-      );
+      // Select position and color per vertex without function-scope arrays
+      // (naga 28 emits invalid SPIR-V ArrayStride on Function storage vars)
+      var pos: vec2f;
+      var color: vec3f;
+      if (i == 0u) {
+        pos = vec2f( 0.0, -0.5);
+        color = vec3f(1.0, 0.0, 0.0);
+      } else if (i == 1u) {
+        pos = vec2f( 0.5,  0.5);
+        color = vec3f(0.0, 1.0, 0.0);
+      } else {
+        pos = vec2f(-0.5,  0.5);
+        color = vec3f(0.0, 0.0, 1.0);
+      }
 
-      let pos = positions[i];
       let s = sin(u.angle);
       let c = cos(u.angle);
       var rotated = vec2f(pos.x * c - pos.y * s, pos.x * s + pos.y * c);
       rotated *= u.scale;
       rotated.x /= u.aspect_ratio;
 
-      return VsOutput(vec4f(rotated, 0.0, 1.0), colors[i]);
+      return VsOutput(vec4f(rotated, 0.0, 1.0), color);
     }
 
     @fragment fn fs(@location(0) color: vec3f) -> @location(0) vec4f {

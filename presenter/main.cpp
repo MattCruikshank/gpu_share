@@ -527,9 +527,16 @@ int main(int argc, char* argv[]) {
             SharedSurfaceInfo newInfo{};
             if (tabs[i].bridge->pollSurfaceUpdate(newHandle, newInfo)) {
                 vkDeviceWaitIdle(vkCtx.getDevice());
+                // Preserve timeline semaphore across surface re-imports (renderer
+                // keeps the same semaphore, only the shared image changes on resize)
+                VkSemaphore savedSem = tabs[i].imported.timelineSem;
+                uint64_t savedFrame = tabs[i].imported.lastFrameValue;
+                tabs[i].imported.timelineSem = VK_NULL_HANDLE; // prevent destroy()
                 tabs[i].imported.destroy(vkCtx.getDevice());
                 tabs[i].imported = importSurface(vkCtx.getDevice(), vkCtx.getPhysicalDevice(),
                                                   newHandle, newInfo);
+                tabs[i].imported.timelineSem = savedSem;
+                tabs[i].imported.lastFrameValue = savedFrame;
                 tabs[i].hasImportedSurface = (tabs[i].imported.image != VK_NULL_HANDLE);
                 fprintf(stderr, "[tab %d] Re-imported surface: %ux%u\n",
                         i + 1, newInfo.width, newInfo.height);
@@ -562,7 +569,8 @@ int main(int argc, char* argv[]) {
             }
         }
 
-        if (activeTab >= 0 && tabs[activeTab].hasImportedSurface) {
+        if (activeTab >= 0 && tabs[activeTab].hasImportedSurface &&
+            tabs[activeTab].imported.lastFrameValue > 0) {
             auto& imp = tabs[activeTab].imported;
             compositor.recordBlit(cmd,
                 imp.image, imp.info.width, imp.info.height,
