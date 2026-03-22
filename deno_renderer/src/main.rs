@@ -1035,6 +1035,65 @@ unsafe fn record_clear_only(
     );
 }
 
+/// Transition the shared image to TRANSFER_SRC_OPTIMAL after WebGPU rendering.
+/// wgpu-core leaves the image in its own tracked state; the presenter needs
+/// TRANSFER_SRC_OPTIMAL to blit from it.
+unsafe fn transition_for_presenter(
+    device: &ash::Device,
+    queue: vk::Queue,
+    cmd_buf: vk::CommandBuffer,
+    fence: vk::Fence,
+    image: vk::Image,
+) {
+    device
+        .reset_command_buffer(cmd_buf, vk::CommandBufferResetFlags::empty())
+        .expect("Failed to reset command buffer");
+
+    let begin_info = vk::CommandBufferBeginInfo::default()
+        .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
+    device
+        .begin_command_buffer(cmd_buf, &begin_info)
+        .expect("Failed to begin command buffer");
+
+    // Transition from UNDEFINED (we don't know what wgpu-core left it as)
+    // to TRANSFER_SRC_OPTIMAL (what the presenter expects).
+    // Using UNDEFINED as old_layout means we don't care about preserving
+    // contents from a previous layout — but the image WAS just rendered to,
+    // so the GPU has the data. The barrier ensures the render writes are
+    // visible before the presenter reads.
+    let barrier = vk::ImageMemoryBarrier::default()
+        .src_access_mask(vk::AccessFlags::COLOR_ATTACHMENT_WRITE | vk::AccessFlags::TRANSFER_WRITE)
+        .dst_access_mask(vk::AccessFlags::TRANSFER_READ)
+        .old_layout(vk::ImageLayout::GENERAL)
+        .new_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL)
+        .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+        .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+        .image(image)
+        .subresource_range(vk::ImageSubresourceRange {
+            aspect_mask: vk::ImageAspectFlags::COLOR,
+            base_mip_level: 0,
+            level_count: 1,
+            base_array_layer: 0,
+            layer_count: 1,
+        });
+
+    device.cmd_pipeline_barrier(
+        cmd_buf,
+        vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT | vk::PipelineStageFlags::TRANSFER,
+        vk::PipelineStageFlags::TRANSFER,
+        vk::DependencyFlags::empty(),
+        &[],
+        &[],
+        &[barrier],
+    );
+
+    device
+        .end_command_buffer(cmd_buf)
+        .expect("Failed to end command buffer");
+
+    submit_and_wait(device, queue, cmd_buf, fence);
+}
+
 unsafe fn submit_and_wait(
     device: &ash::Device,
     queue: vk::Queue,
@@ -1251,7 +1310,7 @@ fn main() {
         .application_version(vk::make_api_version(0, 1, 0, 0))
         .engine_name(engine_name)
         .engine_version(vk::make_api_version(0, 1, 0, 0))
-        .api_version(vk::API_VERSION_1_2);
+        .api_version(vk::API_VERSION_1_3);
 
     let instance_extensions = [
         ash::khr::external_memory_capabilities::NAME.as_ptr(),
@@ -1814,10 +1873,23 @@ fn main() {
                 let frame_code = format!("if(globalThis.__frame)globalThis.__frame({})", elapsed);
                 let _ = runtime.execute_script("<frame>", frame_code);
 
-                // Render frame (skip if WebGPU scene handles its own rendering)
+                // Render frame
                 {
                     let gpu = gpu_state.lock().unwrap();
-                    if !gpu.webgpu_active {
+                    if gpu.webgpu_active {
+                        // WebGPU scene already submitted commands — just
+                        // transition the image to TRANSFER_SRC_OPTIMAL
+                        // so the presenter can blit from it.
+                        unsafe {
+                            transition_for_presenter(
+                                &device,
+                                gpu.graphics_queue,
+                                cmd_buf,
+                                fence,
+                                gpu.shared_img.image,
+                            );
+                        }
+                    } else {
                         unsafe {
                             render_frame(&gpu, cmd_buf, fence, elapsed);
                         }

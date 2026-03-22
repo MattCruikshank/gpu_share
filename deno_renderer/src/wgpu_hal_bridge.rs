@@ -42,7 +42,7 @@ pub unsafe fn create_bridge(
         wgpu_hal::vulkan::Instance::from_raw(
             entry.clone(),
             instance.clone(),
-            vk::API_VERSION_1_2,
+            vk::API_VERSION_1_3,
             0, // android_sdk_version
             None, // debug_utils_create_info — we manage debug utils ourselves
             instance_extensions.to_vec(),
