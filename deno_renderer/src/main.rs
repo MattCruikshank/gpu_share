@@ -967,6 +967,9 @@ fn main() {
             let mut pending_resize: Option<(u32, u32)> = None;
             let mut resize_deadline: Option<std::time::Instant> = None;
             const RESIZE_DEBOUNCE_MS: u64 = 150;
+            // Old images kept alive until next resize so presenter can finish
+            // reading before we free the underlying memory.
+            let mut retired_images: Vec<SharedImage> = Vec::new();
 
             while running.load(Ordering::Relaxed) {
                 // Poll for input events from gRPC stream (non-blocking channel drain)
@@ -1008,9 +1011,16 @@ fn main() {
                         unsafe {
                             device.device_wait_idle().expect("device_wait_idle failed");
 
-                            destroy_shared_image(&device, &mut gpu.render_img);
-                            destroy_shared_image(&device, &mut gpu.shared_img);
-                            gpu.render_img = create_shared_image(
+                            // Destroy any previously retired images (presenter has
+                            // long since switched away from these).
+                            for mut img in retired_images.drain(..) {
+                                destroy_shared_image(&device, &mut img);
+                            }
+
+                            // Create new images FIRST, then retire old ones.
+                            // The old images stay alive so the presenter can finish
+                            // reading from them before polling NotifySurface.
+                            let new_render = create_shared_image(
                                 &instance,
                                 &device,
                                 phys_device,
@@ -1018,7 +1028,7 @@ fn main() {
                                 new_h,
                                 image_format,
                             );
-                            gpu.shared_img = create_shared_image(
+                            let new_shared = create_shared_image(
                                 &instance,
                                 &device,
                                 phys_device,
@@ -1026,6 +1036,10 @@ fn main() {
                                 new_h,
                                 image_format,
                             );
+                            let old_render = std::mem::replace(&mut gpu.render_img, new_render);
+                            let old_shared = std::mem::replace(&mut gpu.shared_img, new_shared);
+                            retired_images.push(old_render);
+                            retired_images.push(old_shared);
                         }
 
                         // Re-import render texture for WebGPU (scene renders here)
@@ -1142,6 +1156,12 @@ fn main() {
                 tokio::time::sleep(Duration::from_millis(sleep_ms)).await;
             }
 
+            // Clean up any retired images from the last resize
+            unsafe {
+                for mut img in retired_images.drain(..) {
+                    destroy_shared_image(&device, &mut img);
+                }
+            }
         });
     }
 
