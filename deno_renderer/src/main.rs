@@ -1061,13 +1061,58 @@ unsafe fn transition_for_presenter(
         .begin_command_buffer(cmd_buf, &begin_info)
         .expect("Failed to begin command buffer");
 
-    // wgpu-core's render pass leaves the image in COLOR_ATTACHMENT_OPTIMAL.
-    // The presenter expects TRANSFER_SRC_OPTIMAL for blitting.
-    // We use a full pipeline barrier to ensure all writes are complete.
+    // DEBUG: clear to magenta first, then transition to TRANSFER_SRC.
+    // If we see magenta, the presenter path works but WebGPU rendering doesn't.
+    // If still black, the transition/presenter path is broken.
+    {
+        let barrier_to_dst = vk::ImageMemoryBarrier::default()
+            .src_access_mask(vk::AccessFlags::MEMORY_WRITE)
+            .dst_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+            .old_layout(vk::ImageLayout::UNDEFINED)
+            .new_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+            .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+            .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+            .image(image)
+            .subresource_range(vk::ImageSubresourceRange {
+                aspect_mask: vk::ImageAspectFlags::COLOR,
+                base_mip_level: 0,
+                level_count: 1,
+                base_array_layer: 0,
+                layer_count: 1,
+            });
+        device.cmd_pipeline_barrier(
+            cmd_buf,
+            vk::PipelineStageFlags::ALL_COMMANDS,
+            vk::PipelineStageFlags::TRANSFER,
+            vk::DependencyFlags::empty(),
+            &[],
+            &[],
+            &[barrier_to_dst],
+        );
+        let clear_color = vk::ClearColorValue {
+            float32: [1.0, 0.0, 1.0, 1.0], // magenta
+        };
+        let range = vk::ImageSubresourceRange {
+            aspect_mask: vk::ImageAspectFlags::COLOR,
+            base_mip_level: 0,
+            level_count: 1,
+            base_array_layer: 0,
+            layer_count: 1,
+        };
+        device.cmd_clear_color_image(
+            cmd_buf,
+            image,
+            vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+            &clear_color,
+            &[range],
+        );
+    }
+
+    // Transition to TRANSFER_SRC_OPTIMAL for the presenter.
     let barrier = vk::ImageMemoryBarrier::default()
-        .src_access_mask(vk::AccessFlags::MEMORY_WRITE)
+        .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
         .dst_access_mask(vk::AccessFlags::TRANSFER_READ)
-        .old_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+        .old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
         .new_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL)
         .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
         .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
@@ -1874,7 +1919,13 @@ fn main() {
                 // Call JS frame callback
                 let elapsed = start_time.elapsed().as_secs_f32();
                 let frame_code = format!("if(globalThis.__frame)globalThis.__frame({})", elapsed);
-                let _ = runtime.execute_script("<frame>", frame_code);
+                if let Err(e) = runtime.execute_script("<frame>", frame_code) {
+                    // Log first frame error only to avoid spam
+                    static LOGGED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+                    if !LOGGED.swap(true, Ordering::Relaxed) {
+                        eprintln!("[deno_renderer] Frame callback error: {}", e);
+                    }
+                }
 
                 // Render frame
                 {
