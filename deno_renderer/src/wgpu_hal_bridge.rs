@@ -5,7 +5,7 @@ use std::ffi::CStr;
 use std::sync::Arc;
 
 use ash::vk;
-use wgpu_core::id::{AdapterId, DeviceId, QueueId, TextureId};
+use wgpu_core::id::{AdapterId, BufferId, DeviceId, QueueId, TextureId};
 use wgpu_types as wgt;
 
 /// The result of bridging our ash Vulkan objects into wgpu-core.
@@ -212,4 +212,94 @@ pub unsafe fn import_texture(
 
     eprintln!("[wgpu_hal_bridge] Imported shared texture: {texture_id:?} ({width}x{height})");
     Ok(texture_id)
+}
+
+/// Create a small staging buffer for `prepare_for_present`.
+/// Only needs to be created once (survives resize since it's size-independent).
+pub fn create_staging_buffer(
+    global: &wgpu_core::global::Global,
+    device_id: DeviceId,
+) -> Result<BufferId, String> {
+    let desc = wgpu_core::resource::BufferDescriptor {
+        label: Some(std::borrow::Cow::Borrowed("present_staging")),
+        size: 256, // minimum aligned size; we only copy 4 bytes (1 RGBA pixel)
+        usage: wgt::BufferUsages::COPY_DST | wgt::BufferUsages::MAP_READ,
+        mapped_at_creation: false,
+    };
+    let (id, err) = global.device_create_buffer(device_id, &desc, None);
+    if let Some(err) = err {
+        return Err(format!("Failed to create staging buffer: {err}"));
+    }
+    Ok(id)
+}
+
+/// Transition the shared texture to COPY_SRC (= VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL)
+/// using wgpu-core's own command submission, keeping the internal layout tracker in sync.
+///
+/// This replaces the old raw-Vulkan `transition_for_presenter` which desynced
+/// wgpu-core's layout tracker and caused black frames.
+pub fn prepare_for_present(
+    global: &wgpu_core::global::Global,
+    device_id: DeviceId,
+    queue_id: QueueId,
+    texture_id: TextureId,
+    staging_buffer_id: BufferId,
+) -> Result<(), String> {
+    // 1. Create command encoder
+    let (encoder_id, err) = global.device_create_command_encoder(
+        device_id,
+        &wgt::CommandEncoderDescriptor {
+            label: Some(std::borrow::Cow::Borrowed("present_transition")),
+        },
+        None,
+    );
+    if let Some(err) = err {
+        return Err(format!("Failed to create command encoder: {err}"));
+    }
+
+    // 2. Copy 1 pixel from shared texture → staging buffer.
+    //    This forces wgpu-core to transition the texture to COPY_SRC
+    //    (= VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL), which is what the presenter needs.
+    let src = wgt::TexelCopyTextureInfo {
+        texture: texture_id,
+        mip_level: 0,
+        origin: wgt::Origin3d::ZERO,
+        aspect: wgt::TextureAspect::All,
+    };
+    let dst = wgt::TexelCopyBufferInfo {
+        buffer: staging_buffer_id,
+        layout: wgt::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(256),
+            rows_per_image: None,
+        },
+    };
+    let size = wgt::Extent3d {
+        width: 1,
+        height: 1,
+        depth_or_array_layers: 1,
+    };
+    if let Some(err) = global
+        .command_encoder_copy_texture_to_buffer(encoder_id, &src, &dst, &size)
+        .err()
+    {
+        return Err(format!("Failed to record copy: {err}"));
+    }
+
+    // 3. Finish + submit
+    let (cmd_buf_id, maybe_err) =
+        global.command_encoder_finish(encoder_id, &wgt::CommandBufferDescriptor::default(), None);
+    if let Some((_label, err)) = maybe_err {
+        return Err(format!("Failed to finish command encoder: {err}"));
+    }
+    if let Some((_, err)) = global.queue_submit(queue_id, &[cmd_buf_id]).err() {
+        return Err(format!("Failed to submit present transition: {err}"));
+    }
+
+    // 4. Wait for GPU completion
+    global
+        .device_poll(device_id, wgt::PollType::wait_indefinitely())
+        .map_err(|e| format!("device_poll failed: {e}"))?;
+
+    Ok(())
 }

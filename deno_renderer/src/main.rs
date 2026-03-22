@@ -1035,113 +1035,6 @@ unsafe fn record_clear_only(
     );
 }
 
-/// Transition the shared image to TRANSFER_SRC_OPTIMAL after WebGPU rendering.
-/// wgpu-core leaves the image in its own tracked state; the presenter needs
-/// TRANSFER_SRC_OPTIMAL to blit from it.
-unsafe fn transition_for_presenter(
-    device: &ash::Device,
-    queue: vk::Queue,
-    cmd_buf: vk::CommandBuffer,
-    fence: vk::Fence,
-    image: vk::Image,
-) {
-    // Wait for wgpu-core's queue submission to complete on the GPU.
-    // wgpu-core uses relay semaphores between submissions, and our raw
-    // vkQueueSubmit doesn't participate in that chain. QueueWaitIdle
-    // ensures all prior GPU work is done before our barrier.
-    device.queue_wait_idle(queue).expect("queue_wait_idle failed");
-
-    device
-        .reset_command_buffer(cmd_buf, vk::CommandBufferResetFlags::empty())
-        .expect("Failed to reset command buffer");
-
-    let begin_info = vk::CommandBufferBeginInfo::default()
-        .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
-    device
-        .begin_command_buffer(cmd_buf, &begin_info)
-        .expect("Failed to begin command buffer");
-
-    // DEBUG: clear to magenta first, then transition to TRANSFER_SRC.
-    // If we see magenta, the presenter path works but WebGPU rendering doesn't.
-    // If still black, the transition/presenter path is broken.
-    {
-        let barrier_to_dst = vk::ImageMemoryBarrier::default()
-            .src_access_mask(vk::AccessFlags::MEMORY_WRITE)
-            .dst_access_mask(vk::AccessFlags::TRANSFER_WRITE)
-            .old_layout(vk::ImageLayout::UNDEFINED)
-            .new_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
-            .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-            .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-            .image(image)
-            .subresource_range(vk::ImageSubresourceRange {
-                aspect_mask: vk::ImageAspectFlags::COLOR,
-                base_mip_level: 0,
-                level_count: 1,
-                base_array_layer: 0,
-                layer_count: 1,
-            });
-        device.cmd_pipeline_barrier(
-            cmd_buf,
-            vk::PipelineStageFlags::ALL_COMMANDS,
-            vk::PipelineStageFlags::TRANSFER,
-            vk::DependencyFlags::empty(),
-            &[],
-            &[],
-            &[barrier_to_dst],
-        );
-        let clear_color = vk::ClearColorValue {
-            float32: [1.0, 0.0, 1.0, 1.0], // magenta
-        };
-        let range = vk::ImageSubresourceRange {
-            aspect_mask: vk::ImageAspectFlags::COLOR,
-            base_mip_level: 0,
-            level_count: 1,
-            base_array_layer: 0,
-            layer_count: 1,
-        };
-        device.cmd_clear_color_image(
-            cmd_buf,
-            image,
-            vk::ImageLayout::TRANSFER_DST_OPTIMAL,
-            &clear_color,
-            &[range],
-        );
-    }
-
-    // Transition to TRANSFER_SRC_OPTIMAL for the presenter.
-    let barrier = vk::ImageMemoryBarrier::default()
-        .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
-        .dst_access_mask(vk::AccessFlags::TRANSFER_READ)
-        .old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
-        .new_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL)
-        .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-        .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-        .image(image)
-        .subresource_range(vk::ImageSubresourceRange {
-            aspect_mask: vk::ImageAspectFlags::COLOR,
-            base_mip_level: 0,
-            level_count: 1,
-            base_array_layer: 0,
-            layer_count: 1,
-        });
-
-    device.cmd_pipeline_barrier(
-        cmd_buf,
-        vk::PipelineStageFlags::ALL_COMMANDS,
-        vk::PipelineStageFlags::TRANSFER,
-        vk::DependencyFlags::empty(),
-        &[],
-        &[],
-        &[barrier],
-    );
-
-    device
-        .end_command_buffer(cmd_buf)
-        .expect("Failed to end command buffer");
-
-    submit_and_wait(device, queue, cmd_buf, fence);
-}
-
 unsafe fn submit_and_wait(
     device: &ash::Device,
     queue: vk::Queue,
@@ -1571,6 +1464,16 @@ fn main() {
         .expect("Failed to import initial shared texture")
     };
 
+    // Staging buffer for prepare_for_present (reused across frames and resizes)
+    let staging_buffer_id = wgpu_hal_bridge::create_staging_buffer(
+        &bridge.global,
+        bridge.device_id,
+    )
+    .expect("Failed to create staging buffer");
+
+    // Track current texture ID (changes on resize)
+    let mut current_texture_id = initial_texture_id;
+
     // -----------------------------------------------------------------------
     // 8. Connect to presenter via gRPC
     // -----------------------------------------------------------------------
@@ -1728,9 +1631,6 @@ fn main() {
                 }
             }
 
-            // DEBUG: skip scene script entirely to test raw Vulkan rendering
-            eprintln!("[deno_renderer] DEBUG: Scene script SKIPPED — testing raw Vulkan clear");
-            if false {
             // Load script — from URL if it starts with http(s)://, otherwise from file
             let script_result = if script_path.starts_with("http://")
                 || script_path.starts_with("https://")
@@ -1767,7 +1667,6 @@ fn main() {
                     );
                 }
             }
-            } // end if false
 
             // ---------------------------------------------------------------
             // 9. Allocate command buffer and fence for render loop
@@ -1889,6 +1788,7 @@ fn main() {
                         };
                         match new_texture_id {
                             Ok(tid) => {
+                                current_texture_id = tid;
                                 let op_state_rc = runtime.op_state();
                                 let mut op_state = op_state_rc.borrow_mut();
                                 op_state.put(deno_webgpu::InjectedTexture {
@@ -1935,27 +1835,23 @@ fn main() {
                 {
                     let gpu = gpu_state.lock().unwrap();
                     if gpu.webgpu_active {
-                        // WebGPU scene already submitted commands — just
-                        // transition the image to TRANSFER_SRC_OPTIMAL
-                        // so the presenter can blit from it.
-                        static LOGGED_BRANCH: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-                        if !LOGGED_BRANCH.swap(true, Ordering::Relaxed) {
-                            eprintln!("[deno_renderer] Using WebGPU render path (transition_for_presenter)");
-                        }
-                        unsafe {
-                            transition_for_presenter(
-                                &device,
-                                gpu.graphics_queue,
-                                cmd_buf,
-                                fence,
-                                gpu.shared_img.image,
-                            );
+                        // WebGPU scene already submitted commands via wgpu-core.
+                        // Use wgpu-core to transition the texture to COPY_SRC
+                        // (= TRANSFER_SRC_OPTIMAL) so the presenter can blit.
+                        // This keeps wgpu-core's layout tracker in sync.
+                        if let Err(e) = wgpu_hal_bridge::prepare_for_present(
+                            &bridge.global,
+                            bridge.device_id,
+                            bridge.queue_id,
+                            current_texture_id,
+                            staging_buffer_id,
+                        ) {
+                            static LOGGED_ERR: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+                            if !LOGGED_ERR.swap(true, Ordering::Relaxed) {
+                                eprintln!("[deno_renderer] prepare_for_present error: {}", e);
+                            }
                         }
                     } else {
-                        static LOGGED_BRANCH2: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-                        if !LOGGED_BRANCH2.swap(true, Ordering::Relaxed) {
-                            eprintln!("[deno_renderer] Using OLD render path (render_frame)");
-                        }
                         unsafe {
                             render_frame(&gpu, cmd_buf, fence, elapsed);
                         }
