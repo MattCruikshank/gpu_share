@@ -1930,7 +1930,7 @@ fn main() {
                 // Render frame
                 {
                     let gpu = gpu_state.lock().unwrap();
-                    if gpu.webgpu_active {
+                    if false && gpu.webgpu_active {
                         // WebGPU scene already submitted commands — just
                         // transition the image to TRANSFER_SRC_OPTIMAL
                         // so the presenter can blit from it.
