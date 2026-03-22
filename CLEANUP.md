@@ -1,6 +1,6 @@
 # Cleanup TODO
 
-Code debt accumulated during the gRPC migration and multi-tab implementation.
+Code debt accumulated during gRPC migration, multi-tab, and WebGPU integration.
 
 ## Delete entirely
 
@@ -24,49 +24,45 @@ Code debt accumulated during the gRPC migration and multi-tab implementation.
 ### `renderer_extension/`
 - Godot GDExtension scaffolding, never integrated
 - Disabled by default (`BUILD_RENDERER_EXTENSION=OFF`)
-- Can be re-scaffolded if needed; remove to reduce clutter
 - Also remove the `BUILD_RENDERER_EXTENSION` option from root `CMakeLists.txt`
 
-## Remove from `deno_renderer/src/main.rs`
+## Remove legacy custom ops from `deno_renderer/src/main.rs`
 
-### Commented-out debug prints
-- Line ~1128: `// eprintln!("[transport] StreamInput connected, waiting for events");`
-- Line ~1131: `// eprintln!("[transport] Received event: case={:?}", ev.event);`
-- Line ~1583: `// eprintln!("[render_loop] Got event: {:?}", ev.event);`
+All scenes now use the standard WebGPU API. The old custom ops and their supporting types can be removed:
 
-### Stale log label
-- Line ~807: `eprintln!("[scene.ts] {}", msg)` — should be `[scene]` since scenes are no longer named `scene.ts`
+### Custom ops (no longer called by any scene)
+- `op_gpu_create_shader_module` — replaced by `device.createShaderModule()`
+- `op_gpu_create_render_pipeline` — replaced by `device.createRenderPipeline()`
+- `op_gpu_create_buffer` — replaced by `device.createBuffer()`
+- `op_gpu_set_clear_color` — replaced by render pass `clearValue`
+- `op_gpu_draw`, `op_gpu_draw_with_vb` — replaced by `pass.draw()`
+- `op_gpu_clear_draws` — no longer needed
+- `op_gpu_set_rotation` — replaced by uniform buffers
 
-### Unused dependency in Cargo.toml
-- `serde = { version = "1", features = ["derive"] }` — not used anywhere in the crate
+### Supporting types (only used by custom ops)
+- `ShaderModuleRes`, `RenderPipelineRes`, `BufferRes` structs
+- `DrawState`, `DrawCommand` structs
+- `GpuState` resource tables: `shader_modules`, `render_pipelines`, `buffers`, `draw_state`
+- `render_frame()` function — only used by old render path
+- `record_clear_only()` function — only used by `render_frame()`
+- `submit_and_wait()` function — only used by `render_frame()`
+- `create_image_view()`, `create_framebuffer()` — only used by old pipeline path
+- Raw Vulkan `cmd_buf` and `fence` in the render loop — only needed for old path
 
-### `#[allow(dead_code)]` audit
-- `BufferRes` struct (~line 63): exists but never instantiated — remove if not planned
-- `GpuState` (~line 73): has the annotation but most fields ARE used — remove the annotation and suppress individually if needed
-- `presenter_pid` field in `GrpcTransport` (~line 1057): stored but never read
+### Other main.rs cleanup
+- Commented-out debug prints
+- `op_log` label says `[scene.ts]` — should be `[scene]`
+- `serde` dependency in Cargo.toml — not used anywhere
 
-## Remove from `presenter/grpc_server.cpp`
+## Minor cleanup
 
-### Commented-out debug print
-- Line ~172: `// fprintf(stderr, "[grpc_server] StreamInput: sending event ...`
+### `presenter/grpc_server.cpp`
+- Commented-out debug print (~line 172)
+- Unused `#include <atomic>`
 
-### Unused include
-- `#include <atomic>` — no `std::atomic` used in this file
-
-## Remove from `presenter/main.cpp`
-
-### Unused include
-- `#include <thread>` — no `std::thread` used directly
-
-## Consider
+### `presenter/main.cpp`
+- Unused `#include <thread>`
 
 ### `shared/shared_handle.h`
 - Still used by presenter for `SharedSurfaceInfo` and `SharedMemoryHandle` types
-- The protobuf `SharedSurfaceInfo` message duplicates the C++ struct
-- Could be replaced by using the generated protobuf struct everywhere, but low priority since it's only used at the transport boundary
-
-### `deno_renderer/scene.ts` (deleted)
-- Already removed — was moved to `scenes/1.ts`. Verify no stale references remain.
-
-### Diagnostic log in `v8_polyfill.js`
-- Self-test at the bottom can be removed once TextEncoder polyfill is confirmed stable on all platforms
+- Low priority: could be replaced by protobuf struct

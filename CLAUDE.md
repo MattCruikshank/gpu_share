@@ -57,11 +57,15 @@ Presenter (C++, SDL3 + Vulkan, multi-tab)
 
 ### Deno renderer (`deno_renderer/`)
 - Rust, headless Vulkan via ash, TypeScript via deno_core (V8), gRPC client via tonic
-- WGSL shader compilation via naga (same compiler wgpu/WebGPU uses)
-- Scene scripts in `deno_renderer/scenes/` define shaders, pipelines, and per-frame input handling
-- WebGPU-shaped ops: `op_gpu_create_shader_module`, `op_gpu_create_render_pipeline`, `op_gpu_draw`, `op_gpu_poll_events`, `op_gpu_set_rotation`, etc.
+- **Standard WebGPU API** via forked deno_webgpu (from Deno v2.7.7, wgpu-core 28)
+- `wgpu_hal_bridge.rs` wraps ash Vulkan objects as wgpu-core Global/Adapter/Device
+- Shared VkImage imported as wgpu-core Texture via `create_texture_from_hal`
+- `prepare_for_present()` uses wgpu-core command encoder to transition shared texture to COPY_SRC (= TRANSFER_SRC_OPTIMAL) after each frame, keeping wgpu-core's layout tracker in sync
+- Scene scripts use standard WebGPU API: `createShaderModule`, `createRenderPipeline`, `beginRenderPass`, `queue.submit`
+- Legacy custom ops (`op_gpu_create_shader_module`, etc.) still present for backward compatibility
 - Per-frame JS callback (`globalThis.__frame`) receives elapsed time
 - `op_gpu_poll_events` returns length-prefixed protobuf bytes → decoded in TS via `proto.decodeEvents()`
+- `webgpu_shim.js` bootstraps `navigator.gpu` + `GPUBufferUsage` in bare V8
 - `v8_polyfill.js` provides TextEncoder/TextDecoder for bare V8 environment
 - `proto_bundle.js` is an esbuild IIFE bundle of protobuf-es runtime + generated types
 - Supports TabPause/TabResume: sleeps at ~2fps when paused, ~60fps when active
@@ -102,13 +106,9 @@ build/presenter/Debug/presenter.exe
 
 ## What's next
 
-### Near-term (active)
-- **WebGPU via forked deno_webgpu** — see `deno_webgpu_plan.md` for full plan
-  - Fork deno_webgpu (~9,250 lines) with ~80 lines of modifications
-  - wgpu-hal bridge wraps our ash Vulkan objects as wgpu-core objects
-  - Inject pre-created Instance/Adapter/Device into deno_webgpu's OpState
-  - Scene scripts use standard WebGPU API instead of custom ops
-  - Keep existing custom ops during transition
+### Near-term
+- **Remove legacy custom ops** — old `op_gpu_create_shader_module`, `op_gpu_create_render_pipeline`, `op_gpu_draw`, etc. are no longer used by any scene. Remove them and the associated `GpuState` resource tables (shader_modules, render_pipelines, buffers, draw_state).
+- **Clean up dead code** — see `CLEANUP.md` for remaining items (test_renderer/, handle_transport/, renderer_extension/, etc.)
 
 ### Medium-term
 - Resize debouncing (coalesce rapid resize events)
@@ -123,7 +123,7 @@ build/presenter/Debug/presenter.exe
 
 ## Conventions
 - C++ code uses `VK_CHECK` macro for Vulkan errors
-- Rust code uses `ash` for Vulkan, `naga` for WGSL compilation, `deno_core` for V8 (transitioning to wgpu + deno_webgpu for WebGPU API)
+- Rust code uses `ash` for Vulkan, `wgpu-core` + forked `deno_webgpu` for WebGPU API, `deno_core` for V8
 - gRPC base port 9710, each tab uses `9710 + tab_index`
 - `--port` / `-p` overrides the base port
 - Proto schema is the single source of truth for wire types (`proto/gpu_share.proto`)
