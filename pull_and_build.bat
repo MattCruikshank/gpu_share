@@ -2,6 +2,9 @@ taskkill /f /im test_renderer.exe 2>nul
 taskkill /f /im deno_renderer.exe 2>nul
 taskkill /f /im presenter.exe 2>nul
 
+del /q build\presenter\Debug\presenter.exe 2>nul
+del /q deno_renderer\target\debug\deno_renderer.exe 2>nul
+
 git pull
 cmake -B build -DCMAKE_TOOLCHAIN_FILE="C:\Users\mattc\source\repos\vcpkg\scripts\buildsystems\vcpkg.cmake"
 cmake --build build --config Debug
