@@ -60,6 +60,7 @@ Presenter (C++, SDL3 + Vulkan, multi-tab)
 - **Standard WebGPU API** via forked deno_webgpu (from Deno v2.7.7, wgpu-core 28)
 - `wgpu_hal_bridge.rs` wraps ash Vulkan objects as wgpu-core Global/Adapter/Device
 - **Double-buffer**: scene renders to an internal VkImage, then `copy_and_present()` copies it to the shared image for the presenter. The shared image is only written during the copy (microseconds), not during the entire render.
+- **Timeline semaphore sync**: renderer creates an exportable `VK_SEMAPHORE_TYPE_TIMELINE` semaphore, passes the handle via gRPC `ConnectRequest.semaphore_handle`, and host-signals after each frame. Presenter imports the semaphore and checks `vkGetSemaphoreCounterValue` before blitting — confirms the shared image is stable.
 - **Frame watchdog**: V8 `terminate_execution()` kills `__frame` if it runs >1 second (infinite-loop protection)
 - **GPU resource limits**: `wgpu_types::Limits` caps texture sizes (4096), buffer sizes (256MB), bind groups (4)
 - Scene scripts use standard WebGPU API: `createShaderModule`, `createRenderPipeline`, `beginRenderPass`, `queue.submit`
@@ -98,6 +99,37 @@ cmake --build build --config Debug
 
 If vcpkg is not available, CMake falls back to FetchContent (builds gRPC from source, slow first build).
 
+#### Windows protoc troubleshooting
+
+If `protoc.exe` from vcpkg is blocked by Windows Device Guard / Application Control policy, you need a matching `protoc` on your system PATH. The protoc version **must match** vcpkg's protobuf library version exactly.
+
+1. **Find vcpkg's protobuf version:**
+   ```bat
+   findstr "PROTOBUF_OSS_VERSION" [vcpkg root]\installed\x64-windows\include\google\protobuf\runtime_version.h
+   ```
+   Look for the `#define PROTOBUF_OSS_VERSION` value (e.g., `6033004` = protobuf v33.4).
+
+2. **Copy vcpkg's protoc + DLLs to a non-blocked PATH directory:**
+   ```bat
+   copy [vcpkg root]\installed\x64-windows\tools\protobuf\protoc.exe %USERPROFILE%\.local\bin\
+   copy [vcpkg root]\installed\x64-windows\tools\protobuf\*.dll %USERPROFILE%\.local\bin\
+   copy [vcpkg root]\installed\x64-windows\bin\abseil_dll.dll %USERPROFILE%\.local\bin\
+   copy [vcpkg root]\installed\x64-windows\bin\libprotobuf*.dll %USERPROFILE%\.local\bin\
+   ```
+   Device Guard policies are often path-based — the same binary may run from a different directory.
+
+3. **Verify:** `protoc --version` should match vcpkg's version.
+
+4. **Clean stale generated files if switching protoc versions:**
+   ```bat
+   del build\CMakeCache.txt
+   del build\proto\gpu_share.pb.* build\proto\gpu_share.grpc.pb.*
+   cmake -B build -DCMAKE_TOOLCHAIN_FILE="..."
+   cmake --build build --config Debug
+   ```
+
+CMake prefers system PATH protoc over vcpkg protoc for both Rust (cargo) and C++ codegen.
+
 ### Run
 ```bash
 # Presenter opens, press 1-9 to launch tabs, R to reload, ESC to quit
@@ -110,8 +142,6 @@ build/presenter/Debug/presenter.exe
 - **Tab bar UI overlay** — visual indicator of active tab, clickable tab switching
 
 ### Medium-term
-- **Sandboxed renderer execution** — run untrusted scene scripts in a sandboxed environment (Deno permissions model or WASM). Restrict file system access, network, and system calls while allowing GPU rendering.
-- **Shared GPU semaphores for frame-perfect sync** — currently the presenter reads the shared image unsynchronized (mailbox model). Add `VK_KHR_external_semaphore` to coordinate renderer writes and presenter reads, eliminating potential tearing.
 - **Performance profiling** — measure and optimize import overhead, frame latency, frame skip rate. Add optional `--perf` flag to log timing data.
 
 ### Long-term
