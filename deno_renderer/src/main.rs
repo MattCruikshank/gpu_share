@@ -1251,7 +1251,7 @@ fn main() {
         .application_version(vk::make_api_version(0, 1, 0, 0))
         .engine_name(engine_name)
         .engine_version(vk::make_api_version(0, 1, 0, 0))
-        .api_version(vk::API_VERSION_1_1);
+        .api_version(vk::API_VERSION_1_2);
 
     let instance_extensions = [
         ash::khr::external_memory_capabilities::NAME.as_ptr(),
@@ -1352,7 +1352,12 @@ fn main() {
         ash::khr::get_memory_requirements2::NAME,
     ];
 
+    // Enable Vulkan 1.2 features needed by wgpu-hal
+    let mut vulkan_12_features = vk::PhysicalDeviceVulkan12Features::default()
+        .timeline_semaphore(true);
+
     let device_ci = vk::DeviceCreateInfo::default()
+        .push_next(&mut vulkan_12_features)
         .queue_create_infos(std::slice::from_ref(&queue_ci))
         .enabled_extension_names(&device_extensions);
 

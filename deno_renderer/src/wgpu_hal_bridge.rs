@@ -42,7 +42,7 @@ pub unsafe fn create_bridge(
         wgpu_hal::vulkan::Instance::from_raw(
             entry.clone(),
             instance.clone(),
-            vk::API_VERSION_1_1,
+            vk::API_VERSION_1_2,
             0, // android_sdk_version
             None, // debug_utils_create_info — we manage debug utils ourselves
             instance_extensions.to_vec(),
@@ -67,8 +67,10 @@ pub unsafe fn create_bridge(
         .expose_adapter(phys_device)
         .ok_or_else(|| "wgpu-hal failed to expose adapter from physical device".to_string())?;
 
-    // Query what features the adapter supports (we'll request a minimal set)
-    let adapter_features = hal_exposed_adapter.features;
+    // Use minimal features — only what our ash Device actually has enabled.
+    // Passing all adapter features would make wgpu-hal try to use extensions
+    // (buffer_device_address, subgroup_size_control, etc.) we didn't enable.
+    let device_features = wgt::Features::empty();
 
     // -----------------------------------------------------------------------
     // 3. Wrap ash Device → wgpu_hal OpenDevice
@@ -82,7 +84,7 @@ pub unsafe fn create_bridge(
                 let _ = &device_clone;
             })),
             device_extensions,
-            adapter_features,
+            device_features,
             &wgt::MemoryHints::Performance,
             queue_family_index,
             queue_index,
@@ -106,7 +108,7 @@ pub unsafe fn create_bridge(
 
     let device_desc = wgpu_core::device::DeviceDescriptor {
         label: None,
-        required_features: adapter_features,
+        required_features: device_features,
         required_limits: wgt::Limits::default(),
         experimental_features: wgt::ExperimentalFeatures::default(),
         memory_hints: wgt::MemoryHints::Performance,
