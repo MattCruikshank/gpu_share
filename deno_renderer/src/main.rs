@@ -1541,24 +1541,34 @@ fn main() {
     // -----------------------------------------------------------------------
     // 7. Create wgpu-hal bridge (wraps ash objects for WebGPU)
     // -----------------------------------------------------------------------
-    // DEBUG: Skip bridge creation to test if it's what breaks rendering
-    eprintln!("[deno_renderer] DEBUG: Bridge creation SKIPPED");
-    let initial_texture_id = wgpu_core::id::TextureId::zip(0, 1);
-    struct FakeBridge {
-        global: std::sync::Arc<wgpu_core::global::Global>,
-        adapter_id: wgpu_core::id::AdapterId,
-        device_id: wgpu_core::id::DeviceId,
-        queue_id: wgpu_core::id::QueueId,
+    let bridge = unsafe {
+        wgpu_hal_bridge::create_bridge(
+            entry.clone(),
+            instance.clone(),
+            phys_device,
+            device.clone(),
+            graphics_queue_family,
+            0, // queue_index
+            instance_extensions_cstr,
+            device_extensions_cstr,
+        )
     }
-    let bridge = FakeBridge {
-        global: std::sync::Arc::new(wgpu_core::global::Global::new(
-            "gpu-share-dummy",
-            &wgpu_types::InstanceDescriptor::default(),
-            None,
-        )),
-        adapter_id: wgpu_core::id::AdapterId::zip(0, 1),
-        device_id: wgpu_core::id::DeviceId::zip(0, 1),
-        queue_id: wgpu_core::id::QueueId::zip(0, 1),
+    .expect("Failed to create wgpu-hal bridge");
+
+    // Import the initial shared image as a wgpu-core texture
+    let initial_texture_id = {
+        let gpu = gpu_state.lock().unwrap();
+        unsafe {
+            wgpu_hal_bridge::import_texture(
+                &bridge.global,
+                bridge.device_id,
+                gpu.shared_img.image,
+                gpu.shared_img.width,
+                gpu.shared_img.height,
+                wgpu_types::TextureFormat::Rgba8Unorm,
+            )
+        }
+        .expect("Failed to import initial shared texture")
     };
 
     // -----------------------------------------------------------------------
@@ -1718,6 +1728,9 @@ fn main() {
                 }
             }
 
+            // DEBUG: skip scene script entirely to test raw Vulkan rendering
+            eprintln!("[deno_renderer] DEBUG: Scene script SKIPPED — testing raw Vulkan clear");
+            if false {
             // Load script — from URL if it starts with http(s)://, otherwise from file
             let script_result = if script_path.starts_with("http://")
                 || script_path.starts_with("https://")
@@ -1754,6 +1767,7 @@ fn main() {
                     );
                 }
             }
+            } // end if false
 
             // ---------------------------------------------------------------
             // 9. Allocate command buffer and fence for render loop
@@ -1920,7 +1934,7 @@ fn main() {
                 // Render frame
                 {
                     let gpu = gpu_state.lock().unwrap();
-                    if false && gpu.webgpu_active {
+                    if gpu.webgpu_active {
                         // WebGPU scene already submitted commands — just
                         // transition the image to TRANSFER_SRC_OPTIMAL
                         // so the presenter can blit from it.
