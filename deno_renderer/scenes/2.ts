@@ -66,10 +66,7 @@ const shaderModule = device.createShaderModule({
         0.2 + t * 0.3
       );
 
-      var out: VsOutput;
-      out.pos = vec4f(p, 0.0, 1.0);
-      out.color = color;
-      return out;
+      return VsOutput(vec4f(p, 0.0, 1.0), color);
     }
 
     @fragment fn fs(@location(0) color: vec3f) -> @location(0) vec4f {
@@ -125,7 +122,10 @@ let height = sharedTexture.height;
 // ---------------------------------------------------------------------------
 // Per-frame callback
 // ---------------------------------------------------------------------------
+let frameCount = 0;
 globalThis.__frame = (elapsed) => {
+  frameCount++;
+  if (frameCount === 1) op_log("[scene2] First __frame call");
   // Process input events
   const rawBuf = op_gpu_poll_events();
   if (rawBuf.length > 0 && globalThis.proto) {

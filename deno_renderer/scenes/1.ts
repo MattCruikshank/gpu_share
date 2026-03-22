@@ -55,10 +55,7 @@ const shaderModule = device.createShaderModule({
       rotated *= u.scale;
       rotated.x /= u.aspect_ratio;
 
-      var out: VsOutput;
-      out.pos = vec4f(rotated, 0.0, 1.0);
-      out.color = colors[i];
-      return out;
+      return VsOutput(vec4f(rotated, 0.0, 1.0), colors[i]);
     }
 
     @fragment fn fs(@location(0) color: vec3f) -> @location(0) vec4f {
