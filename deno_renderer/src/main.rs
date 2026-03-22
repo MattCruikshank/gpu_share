@@ -976,10 +976,13 @@ fn main() {
                 while let Some(ev) = transport.recv_event() {
                     use gpu_share_proto::input_event::Event;
                     match &ev.event {
-                        // Check for resize (needs Vulkan handling in Rust)
+                        // Resize events are held back from JS until the debounce
+                        // handler recreates images. This prevents the scene from
+                        // calling importSharedTexture() before images are ready.
                         Some(Event::Resize(r)) => {
                             pending_resize = Some((r.width, r.height));
                             resize_deadline = Some(std::time::Instant::now() + Duration::from_millis(RESIZE_DEBOUNCE_MS));
+                            continue; // Don't push to input_events yet
                         }
                         Some(Event::TabPause(_)) => {
                             tab_paused = true;
@@ -1095,6 +1098,19 @@ fn main() {
                             memory_type_bits: gpu.shared_img.memory_type_bits,
                         };
                         let _ = transport.notify_surface(&si, gpu.shared_img.handle).await;
+
+                        // Now push the resize event to JS so the scene calls
+                        // importSharedTexture() AFTER images are recreated.
+                        let resize_ev = gpu_share_proto::InputEvent {
+                            event: Some(gpu_share_proto::input_event::Event::Resize(
+                                gpu_share_proto::Resize {
+                                    width: new_w,
+                                    height: new_h,
+                                },
+                            )),
+                        };
+                        gpu.input_events.push(resize_ev.encode_to_vec());
+
                         eprintln!("[deno_renderer] Resized to {}x{}", new_w, new_h);
                     }
                 }
