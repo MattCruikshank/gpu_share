@@ -15,6 +15,8 @@ pub mod gpu_share_proto {
     tonic::include_proto!("gpu_share");
 }
 
+pub mod wgpu_hal_bridge;
+
 #[cfg(unix)]
 type NativeHandle = i32; // fd
 #[cfg(windows)]
@@ -99,6 +101,9 @@ struct GpuState {
 
     // Raw protobuf-encoded InputEvent bytes for TypeScript to consume
     input_events: Vec<Vec<u8>>,
+
+    // When true, skip Rust-side render_frame — WebGPU scenes submit their own commands
+    webgpu_active: bool,
 }
 
 #[derive(Clone)]
@@ -803,6 +808,13 @@ fn op_gpu_set_rotation(state: &mut OpState, drag_angle: f64, speed: f64, scale: 
 }
 
 #[op2(fast)]
+fn op_gpu_set_webgpu_active(state: &mut OpState, active: bool) {
+    let gpu = state.borrow_mut::<Arc<Mutex<GpuState>>>();
+    let mut gpu = gpu.lock().unwrap();
+    gpu.webgpu_active = active;
+}
+
+#[op2(fast)]
 fn op_log(#[string] msg: &str) {
     eprintln!("[scene] {}", msg);
 }
@@ -1247,6 +1259,12 @@ fn main() {
         ash::khr::get_physical_device_properties2::NAME.as_ptr(),
         ash::ext::debug_utils::NAME.as_ptr(),
     ];
+    let instance_extensions_cstr: &[&'static std::ffi::CStr] = &[
+        ash::khr::external_memory_capabilities::NAME,
+        ash::khr::external_semaphore_capabilities::NAME,
+        ash::khr::get_physical_device_properties2::NAME,
+        ash::ext::debug_utils::NAME,
+    ];
 
     let validation_layer = c"VK_LAYER_KHRONOS_validation";
     let layers = [validation_layer.as_ptr()];
@@ -1311,6 +1329,13 @@ fn main() {
         ash::khr::dedicated_allocation::NAME.as_ptr(),
         ash::khr::get_memory_requirements2::NAME.as_ptr(),
     ];
+    #[cfg(unix)]
+    let device_extensions_cstr: &[&'static std::ffi::CStr] = &[
+        ash::khr::external_memory::NAME,
+        ash::khr::external_memory_fd::NAME,
+        ash::khr::dedicated_allocation::NAME,
+        ash::khr::get_memory_requirements2::NAME,
+    ];
 
     #[cfg(windows)]
     let device_extensions = [
@@ -1318,6 +1343,13 @@ fn main() {
         ash::khr::external_memory_win32::NAME.as_ptr(),
         ash::khr::dedicated_allocation::NAME.as_ptr(),
         ash::khr::get_memory_requirements2::NAME.as_ptr(),
+    ];
+    #[cfg(windows)]
+    let device_extensions_cstr: &[&'static std::ffi::CStr] = &[
+        ash::khr::external_memory::NAME,
+        ash::khr::external_memory_win32::NAME,
+        ash::khr::dedicated_allocation::NAME,
+        ash::khr::get_memory_requirements2::NAME,
     ];
 
     let device_ci = vk::DeviceCreateInfo::default()
@@ -1391,10 +1423,44 @@ fn main() {
             scale: 1.0,
         },
         input_events: Vec::new(),
+        webgpu_active: false,
     }));
 
     // -----------------------------------------------------------------------
-    // 7. Connect to presenter via gRPC
+    // 7. Create wgpu-hal bridge (wraps ash objects for WebGPU)
+    // -----------------------------------------------------------------------
+    let bridge = unsafe {
+        wgpu_hal_bridge::create_bridge(
+            entry.clone(),
+            instance.clone(),
+            phys_device,
+            device.clone(),
+            graphics_queue_family,
+            0, // queue_index
+            instance_extensions_cstr,
+            device_extensions_cstr,
+        )
+    }
+    .expect("Failed to create wgpu-hal bridge");
+
+    // Import the initial shared image as a wgpu-core texture
+    let initial_texture_id = {
+        let gpu = gpu_state.lock().unwrap();
+        unsafe {
+            wgpu_hal_bridge::import_texture(
+                &bridge.global,
+                bridge.device_id,
+                gpu.shared_img.image,
+                gpu.shared_img.width,
+                gpu.shared_img.height,
+                wgpu_types::TextureFormat::Rgba8Unorm,
+            )
+        }
+        .expect("Failed to import initial shared texture")
+    };
+
+    // -----------------------------------------------------------------------
+    // 8. Connect to presenter via gRPC
     // -----------------------------------------------------------------------
     eprintln!(
         "[deno_renderer] Connecting to presenter gRPC on {}...",
@@ -1402,7 +1468,7 @@ fn main() {
     );
 
     // -----------------------------------------------------------------------
-    // 8. Deno runtime + render loop (JsRuntime stays alive through loop)
+    // 9. Deno runtime + render loop (JsRuntime stays alive through loop)
     // -----------------------------------------------------------------------
     {
         let gpu_clone = gpu_state.clone();
@@ -1419,6 +1485,7 @@ fn main() {
                 op_gpu_clear_draws,
                 op_gpu_poll_events,
                 op_gpu_set_rotation,
+                op_gpu_set_webgpu_active,
                 op_log
             ]
         );
@@ -1455,11 +1522,39 @@ fn main() {
             eprintln!("[deno_renderer] Surface shared via gRPC.");
 
             let mut runtime = JsRuntime::new(RuntimeOptions {
-                extensions: vec![scene_ext::init()],
+                extensions: vec![
+                    scene_ext::init(),
+                    deno_webgpu::deno_webgpu::init(),
+                ],
                 ..Default::default()
             });
 
+            // Old custom ops state
             runtime.op_state().borrow_mut().put(gpu_clone);
+
+            // WebGPU bridge: inject pre-created wgpu-core objects into OpState
+            {
+                let op_state_rc = runtime.op_state();
+                let mut op_state = op_state_rc.borrow_mut();
+                // The Instance (Arc<Global>) must be in OpState for deno_webgpu
+                op_state.put(bridge.global.clone() as deno_webgpu::Instance);
+                op_state.put(deno_webgpu::InjectedAdapterId(bridge.adapter_id));
+                op_state.put(deno_webgpu::InjectedDeviceIds {
+                    device_id: bridge.device_id,
+                    queue_id: bridge.queue_id,
+                });
+                op_state.put(deno_webgpu::InjectedTexture {
+                    texture_id: initial_texture_id,
+                    width: initial_width,
+                    height: initial_height,
+                    format: deno_webgpu::texture::GPUTextureFormat::Rgba8unorm,
+                    usage: (wgpu_types::TextureUsages::RENDER_ATTACHMENT
+                        | wgpu_types::TextureUsages::COPY_SRC
+                        | wgpu_types::TextureUsages::COPY_DST
+                        | wgpu_types::TextureUsages::TEXTURE_BINDING)
+                        .bits(),
+                });
+            }
 
             // Load V8 polyfills (TextEncoder/TextDecoder) then protobuf bundle
             {
@@ -1502,6 +1597,21 @@ fn main() {
                             "[deno_renderer] Warning: could not load '{}': {} (events will not be decoded in TS)",
                             proto_bundle_path, e
                         );
+                    }
+                }
+
+                // WebGPU shim: sets up navigator.gpu and GPUBufferUsage etc.
+                let webgpu_shim_path = resolve("webgpu_shim.js");
+                match std::fs::read_to_string(&webgpu_shim_path) {
+                    Ok(code) => {
+                        if let Err(e) = runtime.execute_script("<webgpu_shim>", code) {
+                            eprintln!("[deno_renderer] Failed to load webgpu shim: {}", e);
+                        } else {
+                            eprintln!("[deno_renderer] Loaded webgpu_shim.js");
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("[deno_renderer] Warning: could not load '{}': {}", webgpu_shim_path, e);
                     }
                 }
             }
@@ -1650,6 +1760,38 @@ fn main() {
                             }
                         }
 
+                        // Re-import shared texture for WebGPU
+                        let new_texture_id = unsafe {
+                            wgpu_hal_bridge::import_texture(
+                                &bridge.global,
+                                bridge.device_id,
+                                gpu.shared_img.image,
+                                new_w,
+                                new_h,
+                                wgpu_types::TextureFormat::Rgba8Unorm,
+                            )
+                        };
+                        match new_texture_id {
+                            Ok(tid) => {
+                                let op_state_rc = runtime.op_state();
+                                let mut op_state = op_state_rc.borrow_mut();
+                                op_state.put(deno_webgpu::InjectedTexture {
+                                    texture_id: tid,
+                                    width: new_w,
+                                    height: new_h,
+                                    format: deno_webgpu::texture::GPUTextureFormat::Rgba8unorm,
+                                    usage: (wgpu_types::TextureUsages::RENDER_ATTACHMENT
+                                        | wgpu_types::TextureUsages::COPY_SRC
+                                        | wgpu_types::TextureUsages::COPY_DST
+                                        | wgpu_types::TextureUsages::TEXTURE_BINDING)
+                                        .bits(),
+                                });
+                            }
+                            Err(e) => {
+                                eprintln!("[deno_renderer] Failed to re-import texture: {}", e);
+                            }
+                        }
+
                         let si = SharedSurfaceInfo {
                             width: gpu.shared_img.width,
                             height: gpu.shared_img.height,
@@ -1667,11 +1809,13 @@ fn main() {
                 let frame_code = format!("if(globalThis.__frame)globalThis.__frame({})", elapsed);
                 let _ = runtime.execute_script("<frame>", frame_code);
 
-                // Render frame
+                // Render frame (skip if WebGPU scene handles its own rendering)
                 {
                     let gpu = gpu_state.lock().unwrap();
-                    unsafe {
-                        render_frame(&gpu, cmd_buf, fence, elapsed);
+                    if !gpu.webgpu_active {
+                        unsafe {
+                            render_frame(&gpu, cmd_buf, fence, elapsed);
+                        }
                     }
                 }
 

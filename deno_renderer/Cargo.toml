@@ -1,3 +1,6 @@
+[workspace]
+members = [".", "webgpu"]
+
 [package]
 name = "deno_renderer"
 version = "0.1.0"
@@ -6,6 +9,10 @@ edition = "2021"
 [dependencies]
 ash = { version = "0.38", features = ["linked"] }
 deno_core = "0.393"
+deno_webgpu = { path = "webgpu" }
+wgpu-core = { version = "28", features = ["vulkan", "raw-window-handle"] }
+wgpu-hal = { version = "28", features = ["vulkan"] }
+wgpu-types = "28"
 tokio = { version = "1", features = ["full"] }
 naga = { version = "24", features = ["wgsl-in", "spv-out"] }
 tonic = "0.14"
