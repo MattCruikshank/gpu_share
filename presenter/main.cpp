@@ -287,13 +287,19 @@ static bool spawnTab(Tab& tab, const std::string& rendererExe, VkDevice device,
     // For simplicity, do a short blocking wait here
     SharedMemoryHandle handle = kInvalidMemoryHandle;
     SharedSurfaceInfo info{};
-    if (!tab.bridge->waitForRenderer(handle, info, 15000)) {
+    SharedSemaphoreHandle semHandle = kInvalidSemaphoreHandle;
+    if (!tab.bridge->waitForRenderer(handle, info, semHandle, 15000)) {
         fprintf(stderr, "[tab %d] Renderer failed to connect\n", tab.index + 1);
         return false;
     }
 
     tab.imported = importSurface(device, physDevice, handle, info);
     tab.hasImportedSurface = (tab.imported.image != VK_NULL_HANDLE);
+
+    if (semHandle != kInvalidSemaphoreHandle) {
+        tab.imported.timelineSem = importSemaphore(device, physDevice, semHandle);
+    }
+
     tab.connected = true;
 
     fprintf(stderr, "[tab %d] Connected: %ux%u\n", tab.index + 1, info.width, info.height);
@@ -544,6 +550,17 @@ int main(int argc, char* argv[]) {
 
         VkImage swapImage = vkCtx.getSwapchainImage(imageIndex);
         VkExtent2D extent = vkCtx.getSwapchainExtent();
+
+        // Check for new frame from renderer
+        if (activeTab >= 0 && tabs[activeTab].hasImportedSurface &&
+            tabs[activeTab].imported.timelineSem != VK_NULL_HANDLE) {
+            uint64_t value = 0;
+            vkGetSemaphoreCounterValue(vkCtx.getDevice(),
+                tabs[activeTab].imported.timelineSem, &value);
+            if (value > tabs[activeTab].imported.lastFrameValue) {
+                tabs[activeTab].imported.lastFrameValue = value;
+            }
+        }
 
         if (activeTab >= 0 && tabs[activeTab].hasImportedSurface) {
             auto& imp = tabs[activeTab].imported;

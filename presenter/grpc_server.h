@@ -21,6 +21,7 @@ public:
     // Block until a renderer calls Connect. Returns false on timeout/shutdown.
     bool waitForRenderer(SharedMemoryHandle& outHandle,
                          SharedSurfaceInfo& outInfo,
+                         SharedSemaphoreHandle& outSemHandle,
                          uint32_t timeoutMs = 30000);
 
     // Push an input event to be streamed to the renderer.

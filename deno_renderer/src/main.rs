@@ -283,6 +283,7 @@ mod transport {
             renderer_pid: u32,
             surface: &super::SharedSurfaceInfo,
             handle: super::NativeHandle,
+            sem_handle: super::NativeHandle,
         ) -> Result<Self, String> {
             let addr = format!("http://127.0.0.1:{}", port);
 
@@ -325,6 +326,7 @@ mod transport {
                 memory_handle: handle as u64,
                 #[cfg(windows)]
                 memory_handle: handle as u64,
+                semaphore_handle: sem_handle as u64,
             };
 
             let resp = client
@@ -533,6 +535,8 @@ fn main() {
     let device_extensions = [
         ash::khr::external_memory::NAME.as_ptr(),
         ash::khr::external_memory_fd::NAME.as_ptr(),
+        ash::khr::external_semaphore::NAME.as_ptr(),
+        ash::khr::external_semaphore_fd::NAME.as_ptr(),
         ash::khr::dedicated_allocation::NAME.as_ptr(),
         ash::khr::get_memory_requirements2::NAME.as_ptr(),
     ];
@@ -540,6 +544,8 @@ fn main() {
     let device_extensions_cstr: &[&'static std::ffi::CStr] = &[
         ash::khr::external_memory::NAME,
         ash::khr::external_memory_fd::NAME,
+        ash::khr::external_semaphore::NAME,
+        ash::khr::external_semaphore_fd::NAME,
         ash::khr::dedicated_allocation::NAME,
         ash::khr::get_memory_requirements2::NAME,
     ];
@@ -548,6 +554,8 @@ fn main() {
     let device_extensions = [
         ash::khr::external_memory::NAME.as_ptr(),
         ash::khr::external_memory_win32::NAME.as_ptr(),
+        ash::khr::external_semaphore::NAME.as_ptr(),
+        ash::khr::external_semaphore_win32::NAME.as_ptr(),
         ash::khr::dedicated_allocation::NAME.as_ptr(),
         ash::khr::get_memory_requirements2::NAME.as_ptr(),
     ];
@@ -555,6 +563,8 @@ fn main() {
     let device_extensions_cstr: &[&'static std::ffi::CStr] = &[
         ash::khr::external_memory::NAME,
         ash::khr::external_memory_win32::NAME,
+        ash::khr::external_semaphore::NAME,
+        ash::khr::external_semaphore_win32::NAME,
         ash::khr::dedicated_allocation::NAME,
         ash::khr::get_memory_requirements2::NAME,
     ];
@@ -613,6 +623,49 @@ fn main() {
         create_shared_image(&instance, &device, phys_device, initial_width, initial_height, image_format)
     };
     eprintln!("[deno_renderer] Render target created (double-buffer)");
+
+    // Create timeline semaphore for frame synchronization
+    #[cfg(unix)]
+    let sem_handle_type = vk::ExternalSemaphoreHandleTypeFlags::OPAQUE_FD;
+    #[cfg(windows)]
+    let sem_handle_type = vk::ExternalSemaphoreHandleTypeFlags::OPAQUE_WIN32;
+
+    let timeline_sem = unsafe {
+        let mut sem_type_ci = vk::SemaphoreTypeCreateInfo::default()
+            .semaphore_type(vk::SemaphoreType::TIMELINE)
+            .initial_value(0);
+        let mut export_ci = vk::ExportSemaphoreCreateInfo::default()
+            .handle_types(sem_handle_type);
+        let sem_ci = vk::SemaphoreCreateInfo::default()
+            .push_next(&mut sem_type_ci)
+            .push_next(&mut export_ci);
+        device.create_semaphore(&sem_ci, None)
+            .expect("Failed to create timeline semaphore")
+    };
+
+    // Export semaphore handle
+    #[cfg(unix)]
+    let sem_handle: NativeHandle = unsafe {
+        let ext = ash::khr::external_semaphore_fd::Device::new(&instance, &device);
+        let get_fd_info = vk::SemaphoreGetFdInfoKHR::default()
+            .semaphore(timeline_sem)
+            .handle_type(vk::ExternalSemaphoreHandleTypeFlags::OPAQUE_FD);
+        ext.get_semaphore_fd(&get_fd_info)
+            .expect("Failed to export semaphore fd") as NativeHandle
+    };
+
+    #[cfg(windows)]
+    let sem_handle: NativeHandle = unsafe {
+        let ext = ash::khr::external_semaphore_win32::Device::new(&instance, &device);
+        let get_handle_info = vk::SemaphoreGetWin32HandleInfoKHR::default()
+            .semaphore(timeline_sem)
+            .handle_type(vk::ExternalSemaphoreHandleTypeFlags::OPAQUE_WIN32);
+        ext.get_semaphore_win32_handle(&get_handle_info)
+            .expect("Failed to export semaphore handle") as NativeHandle
+    };
+
+    eprintln!("[deno_renderer] Timeline semaphore created, handle={:?}", sem_handle);
+    let mut frame_counter: u64 = 0;
 
     // -----------------------------------------------------------------------
     // 6. Build GpuState
@@ -740,6 +793,7 @@ fn main() {
                 std::process::id(),
                 &surface_info,
                 connect_handle,
+                sem_handle,
             )
             .await
             .unwrap_or_else(|e| panic!("Failed to connect: {}", e));
@@ -1072,6 +1126,16 @@ fn main() {
                     }
                 }
 
+                // Signal timeline semaphore for presenter sync
+                frame_counter += 1;
+                unsafe {
+                    let signal_info = vk::SemaphoreSignalInfo::default()
+                        .semaphore(timeline_sem)
+                        .value(frame_counter);
+                    device.signal_semaphore(&signal_info)
+                        .expect("Failed to signal timeline semaphore");
+                }
+
                 // Must use tokio::time::sleep (not std::thread::sleep) so the
                 // single-threaded tokio runtime can poll the StreamInput task.
                 let sleep_ms = if tab_paused { 500 } else { 16 }; // ~2fps when paused, ~60fps active
@@ -1097,6 +1161,7 @@ fn main() {
         unsafe {
             destroy_shared_image(&device, &mut gpu.render_img);
             destroy_shared_image(&device, &mut gpu.shared_img);
+            device.destroy_semaphore(timeline_sem, None);
             device.destroy_command_pool(command_pool, None);
             device.destroy_device(None);
             instance.destroy_instance(None);

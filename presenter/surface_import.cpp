@@ -3,6 +3,10 @@
 #include <cstdio>
 
 void ImportedSurface::destroy(VkDevice device) {
+    if (timelineSem != VK_NULL_HANDLE) {
+        vkDestroySemaphore(device, timelineSem, nullptr);
+        timelineSem = VK_NULL_HANDLE;
+    }
     if (imageView) vkDestroyImageView(device, imageView, nullptr);
     if (image) vkDestroyImage(device, image, nullptr);
     if (memory) vkFreeMemory(device, memory, nullptr);
@@ -118,4 +122,42 @@ ImportedSurface importSurface(VkDevice device, VkPhysicalDevice physDevice,
             static_cast<unsigned long long>(info.memorySize));
 
     return surface;
+}
+
+VkSemaphore importSemaphore(VkDevice device, VkPhysicalDevice /*physDevice*/,
+                            SharedSemaphoreHandle handle) {
+    VkSemaphoreTypeCreateInfo typeInfo{};
+    typeInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO;
+    typeInfo.semaphoreType = VK_SEMAPHORE_TYPE_TIMELINE;
+    typeInfo.initialValue = 0;
+
+    VkSemaphoreCreateInfo semInfo{};
+    semInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
+    semInfo.pNext = &typeInfo;
+
+    VkSemaphore sem;
+    VK_CHECK(vkCreateSemaphore(device, &semInfo, nullptr, &sem));
+
+#ifdef _WIN32
+    VkImportSemaphoreWin32HandleInfoKHR importInfo{};
+    importInfo.sType = VK_STRUCTURE_TYPE_IMPORT_SEMAPHORE_WIN32_HANDLE_INFO_KHR;
+    importInfo.semaphore = sem;
+    importInfo.handleType = VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_WIN32_BIT;
+    importInfo.handle = handle;
+    auto fpImport = (PFN_vkImportSemaphoreWin32HandleKHR)
+        vkGetDeviceProcAddr(device, "vkImportSemaphoreWin32HandleKHR");
+    VK_CHECK(fpImport(device, &importInfo));
+#else
+    VkImportSemaphoreFdInfoKHR importInfo{};
+    importInfo.sType = VK_STRUCTURE_TYPE_IMPORT_SEMAPHORE_FD_INFO_KHR;
+    importInfo.semaphore = sem;
+    importInfo.handleType = VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT;
+    importInfo.fd = handle;
+    auto fpImport = (PFN_vkImportSemaphoreFdKHR)
+        vkGetDeviceProcAddr(device, "vkImportSemaphoreFdKHR");
+    VK_CHECK(fpImport(device, &importInfo));
+#endif
+
+    fprintf(stderr, "[surface_import] Imported timeline semaphore\n");
+    return sem;
 }

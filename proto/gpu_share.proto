@@ -13,6 +13,9 @@ message ConnectRequest {
   // The raw handle value (fd on Linux, HANDLE on Windows).
   // Presenter clones via pidfd_open + pidfd_getfd / DuplicateHandle.
   uint64 memory_handle = 3;
+  // Timeline semaphore handle for frame synchronization.
+  // Renderer signals after each frame; presenter checks before blit.
+  uint64 semaphore_handle = 4;
 }
 
 // Presenter → Renderer: "acknowledged, here's my PID"

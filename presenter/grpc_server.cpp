@@ -90,6 +90,7 @@ struct BridgeState {
     bool rendererConnected = false;
     uint32_t rendererPid = 0;
     SharedMemoryHandle memoryHandle = kInvalidMemoryHandle;
+    SharedSemaphoreHandle semaphoreHandle = kInvalidSemaphoreHandle;
     SharedSurfaceInfo surfaceInfo{};
 
     // --- Input event queue (main loop → StreamInput handler) ---
@@ -129,6 +130,14 @@ public:
             info = protoToSurfaceInfo(request->surface());
         }
 
+        // Clone semaphore handle
+        uint64_t remoteSemHandle = request->semaphore_handle();
+        SharedSemaphoreHandle localSem = kInvalidSemaphoreHandle;
+        if (remoteSemHandle != 0) {
+            localSem = static_cast<SharedSemaphoreHandle>(cloneHandle(remotePid, remoteSemHandle));
+            fprintf(stderr, "[grpc_server] Cloned semaphore handle\n");
+        }
+
 #ifdef _WIN32
         response->set_presenter_pid(GetCurrentProcessId());
 #else
@@ -139,6 +148,7 @@ public:
             std::lock_guard<std::mutex> lk(state_->connectMu);
             state_->rendererPid = remotePid;
             state_->memoryHandle = localHandle;
+            state_->semaphoreHandle = localSem;
             state_->surfaceInfo = info;
             state_->rendererConnected = true;
         }
@@ -274,6 +284,7 @@ void GrpcBridge::stop() {
 
 bool GrpcBridge::waitForRenderer(SharedMemoryHandle& outHandle,
                                   SharedSurfaceInfo& outInfo,
+                                  SharedSemaphoreHandle& outSemHandle,
                                   uint32_t timeoutMs) {
     std::unique_lock<std::mutex> lk(impl_->state.connectMu);
     if (!impl_->state.connectCv.wait_for(lk,
@@ -284,6 +295,7 @@ bool GrpcBridge::waitForRenderer(SharedMemoryHandle& outHandle,
     }
     outHandle = impl_->state.memoryHandle;
     outInfo = impl_->state.surfaceInfo;
+    outSemHandle = impl_->state.semaphoreHandle;
     return true;
 }
 

@@ -47,7 +47,7 @@ bool VulkanContext::createInstance() {
     appInfo.applicationVersion = VK_MAKE_VERSION(1, 0, 0);
     appInfo.pEngineName = "gpu-share";
     appInfo.engineVersion = VK_MAKE_VERSION(1, 0, 0);
-    appInfo.apiVersion = VK_API_VERSION_1_1;
+    appInfo.apiVersion = VK_API_VERSION_1_2;
 
     // Get SDL required extensions
     uint32_t sdlExtCount = 0;
@@ -142,6 +142,7 @@ bool VulkanContext::pickPhysicalDevice() {
 #endif
         VK_KHR_EXTERNAL_SEMAPHORE_EXTENSION_NAME,
         VK_KHR_DEDICATED_ALLOCATION_EXTENSION_NAME,
+        VK_KHR_TIMELINE_SEMAPHORE_EXTENSION_NAME,
     };
 
     for (auto& dev : devices) {
@@ -212,12 +213,23 @@ bool VulkanContext::createDevice() {
 #endif
         VK_KHR_EXTERNAL_SEMAPHORE_EXTENSION_NAME,
         VK_KHR_DEDICATED_ALLOCATION_EXTENSION_NAME,
+        VK_KHR_TIMELINE_SEMAPHORE_EXTENSION_NAME,
     };
 
     VkPhysicalDeviceFeatures features{};
 
+    VkPhysicalDeviceTimelineSemaphoreFeatures timelineSemFeatures{};
+    timelineSemFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TIMELINE_SEMAPHORE_FEATURES;
+    timelineSemFeatures.timelineSemaphore = VK_TRUE;
+
+    VkPhysicalDeviceVulkan12Features vulkan12Features{};
+    vulkan12Features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES;
+    vulkan12Features.pNext = &timelineSemFeatures;
+    vulkan12Features.timelineSemaphore = VK_TRUE;
+
     VkDeviceCreateInfo createInfo{};
     createInfo.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
+    createInfo.pNext = &vulkan12Features;
     createInfo.queueCreateInfoCount = 1;
     createInfo.pQueueCreateInfos = &queueInfo;
     createInfo.enabledExtensionCount = static_cast<uint32_t>(deviceExts.size());
