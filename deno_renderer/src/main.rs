@@ -1,11 +1,10 @@
-// deno_renderer: Headless Vulkan renderer with WebGPU-like ops for TypeScript.
-// Uses ash for Vulkan, naga for WGSL→SPIR-V compilation.
+// deno_renderer: Headless Vulkan renderer with WebGPU API for TypeScript.
+// Uses ash for Vulkan, wgpu-core + deno_webgpu for WebGPU, deno_core for V8.
 // Creates an exportable VkImage and renders directly to it — zero copy.
 
 use ash::vk;
 use deno_core::{op2, JsRuntime, OpState, RuntimeOptions};
 use prost::Message;
-use std::collections::HashMap;
 use std::ffi::CStr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -44,33 +43,7 @@ struct SharedSurfaceInfo {
 // since events are received as typed protobuf messages.
 
 // ---------------------------------------------------------------------------
-// GPU resource types tracked by ID
-// ---------------------------------------------------------------------------
-
-/// A compiled shader module (SPIR-V + naga module for reflection)
-struct ShaderModuleRes {
-    module: vk::ShaderModule,
-    /// The naga module, kept for entry point enumeration
-    naga_module: naga::Module,
-}
-
-/// A render pipeline: VkPipeline + associated render pass + layout
-struct RenderPipelineRes {
-    pipeline: vk::Pipeline,
-    pipeline_layout: vk::PipelineLayout,
-    render_pass: vk::RenderPass,
-}
-
-/// A GPU buffer (vertex, index, uniform)
-#[allow(dead_code)]
-struct BufferRes {
-    buffer: vk::Buffer,
-    memory: vk::DeviceMemory,
-    size: u64,
-}
-
-// ---------------------------------------------------------------------------
-// GpuState — all Vulkan resources shared between ops and render loop
+// GpuState — Vulkan resources shared between ops and render loop
 // ---------------------------------------------------------------------------
 #[allow(dead_code)]
 struct GpuState {
@@ -86,65 +59,11 @@ struct GpuState {
     shared_img: SharedImage,
     image_format: vk::Format,
 
-    // Framebuffer (recreated on resize or pipeline change)
-    framebuffer: vk::Framebuffer,
-    image_view: vk::ImageView,
-
-    // Resource tables (ID → resource)
-    next_id: u32,
-    shader_modules: HashMap<u32, ShaderModuleRes>,
-    render_pipelines: HashMap<u32, RenderPipelineRes>,
-    buffers: HashMap<u32, BufferRes>,
-
-    // Per-frame draw state set by TypeScript
-    draw_state: DrawState,
-
     // Raw protobuf-encoded InputEvent bytes for TypeScript to consume
     input_events: Vec<Vec<u8>>,
 
-    // When true, skip Rust-side render_frame — WebGPU scenes submit their own commands
+    // When true, WebGPU scenes handle rendering via wgpu-core
     webgpu_active: bool,
-}
-
-#[derive(Clone)]
-struct DrawState {
-    clear_color: [f32; 4],
-    /// List of draw commands to execute each frame
-    draw_commands: Vec<DrawCommand>,
-    /// Accumulated drag rotation from TypeScript
-    drag_angle: f32,
-    /// Rotation speed multiplier from TypeScript
-    rotation_speed: f32,
-    /// Scale factor from TypeScript
-    scale: f32,
-}
-
-impl Default for DrawState {
-    fn default() -> Self {
-        Self {
-            clear_color: [0.0; 4],
-            draw_commands: vec![],
-            drag_angle: 0.0,
-            rotation_speed: 1.0,
-            scale: 1.0,
-        }
-    }
-}
-
-#[derive(Clone)]
-struct DrawCommand {
-    pipeline_id: u32,
-    vertex_count: u32,
-    instance_count: u32,
-    vertex_buffers: Vec<u32>, // buffer IDs
-}
-
-impl GpuState {
-    fn alloc_id(&mut self) -> u32 {
-        let id = self.next_id;
-        self.next_id += 1;
-        id
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -306,479 +225,10 @@ unsafe fn destroy_shared_image(device: &ash::Device, img: &mut SharedImage) {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Image view + framebuffer helpers
-// ---------------------------------------------------------------------------
-unsafe fn create_image_view(
-    device: &ash::Device,
-    image: vk::Image,
-    format: vk::Format,
-) -> vk::ImageView {
-    let view_ci = vk::ImageViewCreateInfo::default()
-        .image(image)
-        .view_type(vk::ImageViewType::TYPE_2D)
-        .format(format)
-        .components(vk::ComponentMapping {
-            r: vk::ComponentSwizzle::IDENTITY,
-            g: vk::ComponentSwizzle::IDENTITY,
-            b: vk::ComponentSwizzle::IDENTITY,
-            a: vk::ComponentSwizzle::IDENTITY,
-        })
-        .subresource_range(vk::ImageSubresourceRange {
-            aspect_mask: vk::ImageAspectFlags::COLOR,
-            base_mip_level: 0,
-            level_count: 1,
-            base_array_layer: 0,
-            layer_count: 1,
-        });
-    device
-        .create_image_view(&view_ci, None)
-        .expect("Failed to create image view")
-}
-
-unsafe fn create_framebuffer(
-    device: &ash::Device,
-    render_pass: vk::RenderPass,
-    image_view: vk::ImageView,
-    width: u32,
-    height: u32,
-) -> vk::Framebuffer {
-    let attachments = [image_view];
-    let fb_ci = vk::FramebufferCreateInfo::default()
-        .render_pass(render_pass)
-        .attachments(&attachments)
-        .width(width)
-        .height(height)
-        .layers(1);
-    device
-        .create_framebuffer(&fb_ci, None)
-        .expect("Failed to create framebuffer")
-}
-
-
 
 // ---------------------------------------------------------------------------
-// Deno ops — WebGPU-like API for TypeScript
+// Deno ops
 // ---------------------------------------------------------------------------
-
-/// op_gpu_create_shader_module(wgsl_code: String) -> u32
-/// Parses WGSL, validates, keeps the naga Module for reflection.
-/// Does NOT yet compile to SPIR-V (that happens per entry point in pipeline creation).
-#[op2(fast)]
-fn op_gpu_create_shader_module(state: &mut OpState, #[string] wgsl_code: &str) -> u32 {
-    let gpu = state.borrow_mut::<Arc<Mutex<GpuState>>>();
-    let mut gpu = gpu.lock().unwrap();
-
-    // Parse WGSL
-    let naga_module = match naga::front::wgsl::parse_str(wgsl_code) {
-        Ok(m) => m,
-        Err(e) => {
-            eprintln!("[gpu] WGSL parse error: {}", e);
-            return u32::MAX; // error sentinel
-        }
-    };
-
-    // Validate
-    let mut validator = naga::valid::Validator::new(
-        naga::valid::ValidationFlags::all(),
-        naga::valid::Capabilities::all(),
-    );
-    if let Err(e) = validator.validate(&naga_module) {
-        eprintln!("[gpu] WGSL validation error: {}", e);
-        return u32::MAX;
-    }
-
-    // Create a dummy VkShaderModule — we will create real ones per entry point
-    // during pipeline creation. Store the naga module for later.
-    let id = gpu.alloc_id();
-    gpu.shader_modules.insert(
-        id,
-        ShaderModuleRes {
-            module: vk::ShaderModule::null(), // placeholder
-            naga_module,
-        },
-    );
-
-    eprintln!("[gpu] Created shader module id={}", id);
-    id
-}
-
-/// op_gpu_create_render_pipeline(shader_id: u32, vert_entry: String, frag_entry: String) -> u32
-/// Compiles WGSL to SPIR-V for both stages, creates VkRenderPass + VkPipeline.
-#[op2(fast)]
-fn op_gpu_create_render_pipeline(
-    state: &mut OpState,
-    shader_id: u32,
-    #[string] vert_entry: &str,
-    #[string] frag_entry: &str,
-) -> u32 {
-    let gpu = state.borrow_mut::<Arc<Mutex<GpuState>>>();
-    let mut gpu = gpu.lock().unwrap();
-
-    let wgsl_source = {
-        let shader_res = match gpu.shader_modules.get(&shader_id) {
-            Some(s) => s,
-            None => {
-                eprintln!("[gpu] Invalid shader module id={}", shader_id);
-                return u32::MAX;
-            }
-        };
-        // Re-serialize isn't possible; we need the original source.
-        // Instead, we stored the naga module. We need to compile SPIR-V from it.
-        // But naga::back::spv::write_vec needs a Module + ModuleInfo.
-        // Let's re-validate to get ModuleInfo.
-        let mut validator = naga::valid::Validator::new(
-            naga::valid::ValidationFlags::all(),
-            naga::valid::Capabilities::all(),
-        );
-        let info = match validator.validate(&shader_res.naga_module) {
-            Ok(i) => i,
-            Err(e) => {
-                eprintln!("[gpu] Re-validation error: {}", e);
-                return u32::MAX;
-            }
-        };
-        (shader_res.naga_module.clone(), info)
-    };
-
-    let (naga_module, module_info) = wgsl_source;
-
-    // Compile vertex SPIR-V
-    let options = naga::back::spv::Options {
-        lang_version: (1, 0),
-        flags: naga::back::spv::WriterFlags::empty(),
-        ..Default::default()
-    };
-    let vert_spirv = {
-        let pipeline_options = naga::back::spv::PipelineOptions {
-            shader_stage: naga::ShaderStage::Vertex,
-            entry_point: vert_entry.to_string(),
-        };
-        match naga::back::spv::write_vec(&naga_module, &module_info, &options, Some(&pipeline_options))
-        {
-            Ok(s) => s,
-            Err(e) => {
-                eprintln!("[gpu] Vertex SPIR-V error: {}", e);
-                return u32::MAX;
-            }
-        }
-    };
-
-    // Compile fragment SPIR-V
-    let frag_spirv = {
-        let pipeline_options = naga::back::spv::PipelineOptions {
-            shader_stage: naga::ShaderStage::Fragment,
-            entry_point: frag_entry.to_string(),
-        };
-        match naga::back::spv::write_vec(&naga_module, &module_info, &options, Some(&pipeline_options))
-        {
-            Ok(s) => s,
-            Err(e) => {
-                eprintln!("[gpu] Fragment SPIR-V error: {}", e);
-                return u32::MAX;
-            }
-        }
-    };
-
-    unsafe {
-        // Create VkShaderModules
-        let vert_module_ci = vk::ShaderModuleCreateInfo::default().code(&vert_spirv);
-        let vert_module = gpu
-            .device
-            .create_shader_module(&vert_module_ci, None)
-            .expect("Failed to create vertex shader module");
-
-        let frag_module_ci = vk::ShaderModuleCreateInfo::default().code(&frag_spirv);
-        let frag_module = gpu
-            .device
-            .create_shader_module(&frag_module_ci, None)
-            .expect("Failed to create fragment shader module");
-
-        // naga 24 preserves entry point names from WGSL in the SPIR-V
-        let vert_entry_c = std::ffi::CString::new(vert_entry).unwrap();
-        let frag_entry_c = std::ffi::CString::new(frag_entry).unwrap();
-
-        let shader_stages = [
-            vk::PipelineShaderStageCreateInfo::default()
-                .stage(vk::ShaderStageFlags::VERTEX)
-                .module(vert_module)
-                .name(&vert_entry_c),
-            vk::PipelineShaderStageCreateInfo::default()
-                .stage(vk::ShaderStageFlags::FRAGMENT)
-                .module(frag_module)
-                .name(&frag_entry_c),
-        ];
-
-        // Vertex input: no buffers by default (shader generates vertices)
-        let vertex_input = vk::PipelineVertexInputStateCreateInfo::default();
-
-        let input_assembly = vk::PipelineInputAssemblyStateCreateInfo::default()
-            .topology(vk::PrimitiveTopology::TRIANGLE_LIST)
-            .primitive_restart_enable(false);
-
-        // Dynamic viewport and scissor
-        let dynamic_states = [vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
-        let dynamic_state =
-            vk::PipelineDynamicStateCreateInfo::default().dynamic_states(&dynamic_states);
-
-        let viewport_state = vk::PipelineViewportStateCreateInfo::default()
-            .viewport_count(1)
-            .scissor_count(1);
-
-        let rasterizer = vk::PipelineRasterizationStateCreateInfo::default()
-            .depth_clamp_enable(false)
-            .rasterizer_discard_enable(false)
-            .polygon_mode(vk::PolygonMode::FILL)
-            .line_width(1.0)
-            .cull_mode(vk::CullModeFlags::NONE)
-            .front_face(vk::FrontFace::COUNTER_CLOCKWISE)
-            .depth_bias_enable(false);
-
-        let multisampling = vk::PipelineMultisampleStateCreateInfo::default()
-            .sample_shading_enable(false)
-            .rasterization_samples(vk::SampleCountFlags::TYPE_1);
-
-        let color_blend_attachment = vk::PipelineColorBlendAttachmentState::default()
-            .color_write_mask(vk::ColorComponentFlags::RGBA)
-            .blend_enable(false);
-
-        let color_blending = vk::PipelineColorBlendStateCreateInfo::default()
-            .logic_op_enable(false)
-            .attachments(std::slice::from_ref(&color_blend_attachment));
-
-        // Create render pass
-        let color_attachment = vk::AttachmentDescription::default()
-            .format(gpu.image_format)
-            .samples(vk::SampleCountFlags::TYPE_1)
-            .load_op(vk::AttachmentLoadOp::CLEAR)
-            .store_op(vk::AttachmentStoreOp::STORE)
-            .stencil_load_op(vk::AttachmentLoadOp::DONT_CARE)
-            .stencil_store_op(vk::AttachmentStoreOp::DONT_CARE)
-            .initial_layout(vk::ImageLayout::UNDEFINED)
-            .final_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL);
-
-        let color_ref = vk::AttachmentReference::default()
-            .attachment(0)
-            .layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL);
-
-        let subpass = vk::SubpassDescription::default()
-            .pipeline_bind_point(vk::PipelineBindPoint::GRAPHICS)
-            .color_attachments(std::slice::from_ref(&color_ref));
-
-        let dependency = vk::SubpassDependency::default()
-            .src_subpass(vk::SUBPASS_EXTERNAL)
-            .dst_subpass(0)
-            .src_stage_mask(vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT)
-            .src_access_mask(vk::AccessFlags::empty())
-            .dst_stage_mask(vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT)
-            .dst_access_mask(vk::AccessFlags::COLOR_ATTACHMENT_WRITE);
-
-        let render_pass_ci = vk::RenderPassCreateInfo::default()
-            .attachments(std::slice::from_ref(&color_attachment))
-            .subpasses(std::slice::from_ref(&subpass))
-            .dependencies(std::slice::from_ref(&dependency));
-
-        let render_pass = gpu
-            .device
-            .create_render_pass(&render_pass_ci, None)
-            .expect("Failed to create render pass");
-
-        // Pipeline layout with push constants: float angle, float aspect_ratio, float scale
-        let push_constant_range = vk::PushConstantRange::default()
-            .stage_flags(vk::ShaderStageFlags::VERTEX)
-            .offset(0)
-            .size(12); // 3 floats
-
-        let pipeline_layout_ci = vk::PipelineLayoutCreateInfo::default()
-            .push_constant_ranges(std::slice::from_ref(&push_constant_range));
-        let pipeline_layout = gpu
-            .device
-            .create_pipeline_layout(&pipeline_layout_ci, None)
-            .expect("Failed to create pipeline layout");
-
-        // Create the graphics pipeline
-        let pipeline_ci = vk::GraphicsPipelineCreateInfo::default()
-            .stages(&shader_stages)
-            .vertex_input_state(&vertex_input)
-            .input_assembly_state(&input_assembly)
-            .viewport_state(&viewport_state)
-            .rasterization_state(&rasterizer)
-            .multisample_state(&multisampling)
-            .color_blend_state(&color_blending)
-            .dynamic_state(&dynamic_state)
-            .layout(pipeline_layout)
-            .render_pass(render_pass)
-            .subpass(0);
-
-        let pipeline = match gpu
-            .device
-            .create_graphics_pipelines(vk::PipelineCache::null(), &[pipeline_ci], None)
-        {
-            Ok(pipelines) => pipelines[0],
-            Err((_, err)) => {
-                eprintln!("[gpu] Failed to create graphics pipeline: {:?}", err);
-                eprintln!("[gpu] Vert SPIR-V: {} words, Frag SPIR-V: {} words", vert_spirv.len(), frag_spirv.len());
-                gpu.device.destroy_pipeline_layout(pipeline_layout, None);
-                gpu.device.destroy_render_pass(render_pass, None);
-                return u32::MAX;
-            }
-        };
-
-        // Cleanup shader modules (SPIR-V is baked into the pipeline now)
-        gpu.device.destroy_shader_module(vert_module, None);
-        gpu.device.destroy_shader_module(frag_module, None);
-
-        // If this is the first pipeline, create the framebuffer for it
-        if gpu.image_view == vk::ImageView::null() {
-            gpu.image_view =
-                create_image_view(&gpu.device, gpu.shared_img.image, gpu.image_format);
-        }
-        if gpu.framebuffer == vk::Framebuffer::null() {
-            gpu.framebuffer = create_framebuffer(
-                &gpu.device,
-                render_pass,
-                gpu.image_view,
-                gpu.shared_img.width,
-                gpu.shared_img.height,
-            );
-        }
-
-        let id = gpu.alloc_id();
-        gpu.render_pipelines.insert(
-            id,
-            RenderPipelineRes {
-                pipeline,
-                pipeline_layout,
-                render_pass,
-            },
-        );
-
-        eprintln!("[gpu] Created render pipeline id={}", id);
-        id
-    }
-}
-
-/// op_gpu_create_buffer(data: &[u8], usage: String) -> u32
-/// Creates a VkBuffer with the given data. Usage: "vertex", "index", "uniform".
-#[op2(fast)]
-fn op_gpu_create_buffer(
-    state: &mut OpState,
-    #[buffer] data: &[u8],
-    #[string] usage: &str,
-) -> u32 {
-    let gpu = state.borrow_mut::<Arc<Mutex<GpuState>>>();
-    let mut gpu = gpu.lock().unwrap();
-
-    let vk_usage = match usage {
-        "vertex" => vk::BufferUsageFlags::VERTEX_BUFFER,
-        "index" => vk::BufferUsageFlags::INDEX_BUFFER,
-        "uniform" => vk::BufferUsageFlags::UNIFORM_BUFFER,
-        _ => {
-            eprintln!("[gpu] Unknown buffer usage: {}", usage);
-            return u32::MAX;
-        }
-    };
-
-    let size = data.len() as u64;
-
-    unsafe {
-        let buffer_ci = vk::BufferCreateInfo::default()
-            .size(size)
-            .usage(vk_usage)
-            .sharing_mode(vk::SharingMode::EXCLUSIVE);
-
-        let buffer = gpu
-            .device
-            .create_buffer(&buffer_ci, None)
-            .expect("Failed to create buffer");
-
-        let mem_reqs = gpu.device.get_buffer_memory_requirements(buffer);
-
-        let mem_type_index = find_memory_type(
-            &gpu.instance,
-            gpu.phys_device,
-            mem_reqs.memory_type_bits,
-            vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
-        );
-
-        let alloc_info = vk::MemoryAllocateInfo::default()
-            .allocation_size(mem_reqs.size)
-            .memory_type_index(mem_type_index);
-
-        let memory = gpu
-            .device
-            .allocate_memory(&alloc_info, None)
-            .expect("Failed to allocate buffer memory");
-
-        gpu.device
-            .bind_buffer_memory(buffer, memory, 0)
-            .expect("Failed to bind buffer memory");
-
-        // Map and copy data
-        let ptr = gpu
-            .device
-            .map_memory(memory, 0, size, vk::MemoryMapFlags::empty())
-            .expect("Failed to map buffer memory");
-        std::ptr::copy_nonoverlapping(data.as_ptr(), ptr as *mut u8, data.len());
-        gpu.device.unmap_memory(memory);
-
-        let id = gpu.alloc_id();
-        gpu.buffers.insert(id, BufferRes { buffer, memory, size });
-
-        eprintln!("[gpu] Created buffer id={} size={} usage={}", id, size, usage);
-        id
-    }
-}
-
-/// op_gpu_set_clear_color(r, g, b, a)
-#[op2(fast)]
-fn op_gpu_set_clear_color(state: &mut OpState, r: f64, g: f64, b: f64, a: f64) {
-    let gpu = state.borrow_mut::<Arc<Mutex<GpuState>>>();
-    let mut gpu = gpu.lock().unwrap();
-    gpu.draw_state.clear_color = [r as f32, g as f32, b as f32, a as f32];
-}
-
-/// op_gpu_draw(pipeline_id: u32, vertex_count: u32, instance_count: u32)
-/// Adds a draw command to the per-frame draw list.
-#[op2(fast)]
-fn op_gpu_draw(state: &mut OpState, pipeline_id: u32, vertex_count: u32, instance_count: u32) {
-    let gpu = state.borrow_mut::<Arc<Mutex<GpuState>>>();
-    let mut gpu = gpu.lock().unwrap();
-    gpu.draw_state.draw_commands.push(DrawCommand {
-        pipeline_id,
-        vertex_count,
-        instance_count,
-        vertex_buffers: vec![],
-    });
-}
-
-/// op_gpu_draw_with_vb(pipeline_id: u32, vertex_count: u32, instance_count: u32, buffer_id: u32)
-/// Adds a draw command that binds a vertex buffer.
-#[op2(fast)]
-fn op_gpu_draw_with_vb(
-    state: &mut OpState,
-    pipeline_id: u32,
-    vertex_count: u32,
-    instance_count: u32,
-    buffer_id: u32,
-) {
-    let gpu = state.borrow_mut::<Arc<Mutex<GpuState>>>();
-    let mut gpu = gpu.lock().unwrap();
-    gpu.draw_state.draw_commands.push(DrawCommand {
-        pipeline_id,
-        vertex_count,
-        instance_count,
-        vertex_buffers: vec![buffer_id],
-    });
-}
-
-/// op_gpu_clear_draws() — reset draw list (call before re-setting draws)
-#[op2(fast)]
-fn op_gpu_clear_draws(state: &mut OpState) {
-    let gpu = state.borrow_mut::<Arc<Mutex<GpuState>>>();
-    let mut gpu = gpu.lock().unwrap();
-    gpu.draw_state.draw_commands.clear();
-}
 
 /// Returns all pending input events as length-prefixed protobuf bytes.
 /// Format: [u32le length][protobuf bytes][u32le length][protobuf bytes]...
@@ -799,15 +249,6 @@ fn op_gpu_poll_events(state: &mut OpState) -> Vec<u8> {
 }
 
 #[op2(fast)]
-fn op_gpu_set_rotation(state: &mut OpState, drag_angle: f64, speed: f64, scale: f64) {
-    let gpu = state.borrow_mut::<Arc<Mutex<GpuState>>>();
-    let mut gpu = gpu.lock().unwrap();
-    gpu.draw_state.drag_angle = drag_angle as f32;
-    gpu.draw_state.rotation_speed = speed as f32;
-    gpu.draw_state.scale = scale as f32;
-}
-
-#[op2(fast)]
 fn op_gpu_set_webgpu_active(state: &mut OpState, active: bool) {
     let gpu = state.borrow_mut::<Arc<Mutex<GpuState>>>();
     let mut gpu = gpu.lock().unwrap();
@@ -817,241 +258,6 @@ fn op_gpu_set_webgpu_active(state: &mut OpState, active: bool) {
 #[op2(fast)]
 fn op_log(#[string] msg: &str) {
     eprintln!("[scene] {}", msg);
-}
-
-// ---------------------------------------------------------------------------
-// Render frame — records commands and submits
-// ---------------------------------------------------------------------------
-unsafe fn render_frame(
-    gpu: &GpuState,
-    cmd_buf: vk::CommandBuffer,
-    fence: vk::Fence,
-    elapsed_secs: f32,
-) {
-    let device = &gpu.device;
-    let draw_state = &gpu.draw_state;
-
-    device
-        .reset_command_buffer(cmd_buf, vk::CommandBufferResetFlags::empty())
-        .expect("Failed to reset command buffer");
-
-    let begin_info = vk::CommandBufferBeginInfo::default()
-        .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
-    device
-        .begin_command_buffer(cmd_buf, &begin_info)
-        .expect("Failed to begin command buffer");
-
-    let has_pipeline = !draw_state.draw_commands.is_empty();
-
-    if has_pipeline && gpu.framebuffer != vk::Framebuffer::null() {
-        // Use render pass for pipeline-based rendering
-        let first_pipeline_id = draw_state.draw_commands[0].pipeline_id;
-        let render_pass = match gpu.render_pipelines.get(&first_pipeline_id) {
-            Some(p) => p.render_pass,
-            None => {
-                eprintln!("[gpu] Pipeline {} not found, falling back to clear", first_pipeline_id);
-                record_clear_only(device, cmd_buf, &gpu.shared_img, &draw_state.clear_color);
-                device.end_command_buffer(cmd_buf).expect("end cmd buf");
-                submit_and_wait(device, gpu.graphics_queue, cmd_buf, fence);
-                return;
-            }
-        };
-
-        let clear_values = [vk::ClearValue {
-            color: vk::ClearColorValue {
-                float32: draw_state.clear_color,
-            },
-        }];
-
-        let render_pass_bi = vk::RenderPassBeginInfo::default()
-            .render_pass(render_pass)
-            .framebuffer(gpu.framebuffer)
-            .render_area(vk::Rect2D {
-                offset: vk::Offset2D { x: 0, y: 0 },
-                extent: vk::Extent2D {
-                    width: gpu.shared_img.width,
-                    height: gpu.shared_img.height,
-                },
-            })
-            .clear_values(&clear_values);
-
-        device.cmd_begin_render_pass(cmd_buf, &render_pass_bi, vk::SubpassContents::INLINE);
-
-        // Set dynamic viewport and scissor
-        let viewport = vk::Viewport {
-            x: 0.0,
-            y: 0.0,
-            width: gpu.shared_img.width as f32,
-            height: gpu.shared_img.height as f32,
-            min_depth: 0.0,
-            max_depth: 1.0,
-        };
-        device.cmd_set_viewport(cmd_buf, 0, &[viewport]);
-
-        let scissor = vk::Rect2D {
-            offset: vk::Offset2D { x: 0, y: 0 },
-            extent: vk::Extent2D {
-                width: gpu.shared_img.width,
-                height: gpu.shared_img.height,
-            },
-        };
-        device.cmd_set_scissor(cmd_buf, 0, &[scissor]);
-
-        // Execute draw commands
-        for draw_cmd in &draw_state.draw_commands {
-            if let Some(pipeline_res) = gpu.render_pipelines.get(&draw_cmd.pipeline_id) {
-                device.cmd_bind_pipeline(
-                    cmd_buf,
-                    vk::PipelineBindPoint::GRAPHICS,
-                    pipeline_res.pipeline,
-                );
-
-                // Push rotation constants: angle (elapsed * speed + drag), aspect, scale
-                let aspect = gpu.shared_img.width as f32 / gpu.shared_img.height as f32;
-                let angle = elapsed_secs * draw_state.rotation_speed + draw_state.drag_angle;
-                let push_data = [angle, aspect, draw_state.scale];
-                device.cmd_push_constants(
-                    cmd_buf,
-                    pipeline_res.pipeline_layout,
-                    vk::ShaderStageFlags::VERTEX,
-                    0,
-                    std::slice::from_raw_parts(
-                        push_data.as_ptr() as *const u8,
-                        std::mem::size_of_val(&push_data),
-                    ),
-                );
-
-                // Bind vertex buffers if any
-                for (i, &buf_id) in draw_cmd.vertex_buffers.iter().enumerate() {
-                    if let Some(buf_res) = gpu.buffers.get(&buf_id) {
-                        device.cmd_bind_vertex_buffers(
-                            cmd_buf,
-                            i as u32,
-                            &[buf_res.buffer],
-                            &[0],
-                        );
-                    }
-                }
-
-                device.cmd_draw(
-                    cmd_buf,
-                    draw_cmd.vertex_count,
-                    draw_cmd.instance_count,
-                    0,
-                    0,
-                );
-            }
-        }
-
-        device.cmd_end_render_pass(cmd_buf);
-    } else {
-        // Fallback: just clear the image (no pipeline)
-        record_clear_only(device, cmd_buf, &gpu.shared_img, &draw_state.clear_color);
-    }
-
-    device
-        .end_command_buffer(cmd_buf)
-        .expect("Failed to end command buffer");
-
-    submit_and_wait(device, gpu.graphics_queue, cmd_buf, fence);
-}
-
-unsafe fn record_clear_only(
-    device: &ash::Device,
-    cmd_buf: vk::CommandBuffer,
-    shared_img: &SharedImage,
-    clear_color: &[f32; 4],
-) {
-    // Transition UNDEFINED -> TRANSFER_DST
-    let barrier = vk::ImageMemoryBarrier::default()
-        .src_access_mask(vk::AccessFlags::empty())
-        .dst_access_mask(vk::AccessFlags::TRANSFER_WRITE)
-        .old_layout(vk::ImageLayout::UNDEFINED)
-        .new_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
-        .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-        .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-        .image(shared_img.image)
-        .subresource_range(vk::ImageSubresourceRange {
-            aspect_mask: vk::ImageAspectFlags::COLOR,
-            base_mip_level: 0,
-            level_count: 1,
-            base_array_layer: 0,
-            layer_count: 1,
-        });
-
-    device.cmd_pipeline_barrier(
-        cmd_buf,
-        vk::PipelineStageFlags::TOP_OF_PIPE,
-        vk::PipelineStageFlags::TRANSFER,
-        vk::DependencyFlags::empty(),
-        &[],
-        &[],
-        &[barrier],
-    );
-
-    let clear = vk::ClearColorValue {
-        float32: *clear_color,
-    };
-    let range = vk::ImageSubresourceRange {
-        aspect_mask: vk::ImageAspectFlags::COLOR,
-        base_mip_level: 0,
-        level_count: 1,
-        base_array_layer: 0,
-        layer_count: 1,
-    };
-    device.cmd_clear_color_image(
-        cmd_buf,
-        shared_img.image,
-        vk::ImageLayout::TRANSFER_DST_OPTIMAL,
-        &clear,
-        &[range],
-    );
-
-    // Transition TRANSFER_DST -> TRANSFER_SRC (presenter expects this)
-    let barrier2 = vk::ImageMemoryBarrier::default()
-        .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
-        .dst_access_mask(vk::AccessFlags::empty())
-        .old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
-        .new_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL)
-        .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-        .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-        .image(shared_img.image)
-        .subresource_range(vk::ImageSubresourceRange {
-            aspect_mask: vk::ImageAspectFlags::COLOR,
-            base_mip_level: 0,
-            level_count: 1,
-            base_array_layer: 0,
-            layer_count: 1,
-        });
-
-    device.cmd_pipeline_barrier(
-        cmd_buf,
-        vk::PipelineStageFlags::TRANSFER,
-        vk::PipelineStageFlags::BOTTOM_OF_PIPE,
-        vk::DependencyFlags::empty(),
-        &[],
-        &[],
-        &[barrier2],
-    );
-}
-
-unsafe fn submit_and_wait(
-    device: &ash::Device,
-    queue: vk::Queue,
-    cmd_buf: vk::CommandBuffer,
-    fence: vk::Fence,
-) {
-    device.reset_fences(&[fence]).expect("Failed to reset fences");
-
-    let submit_info = vk::SubmitInfo::default().command_buffers(std::slice::from_ref(&cmd_buf));
-
-    device
-        .queue_submit(queue, &[submit_info], fence)
-        .expect("Failed to submit queue");
-
-    device
-        .wait_for_fences(&[fence], true, u64::MAX)
-        .expect("Failed to wait for fence");
 }
 
 // ---------------------------------------------------------------------------
@@ -1414,20 +620,7 @@ fn main() {
         command_pool,
         shared_img,
         image_format,
-        framebuffer: vk::Framebuffer::null(),
-        image_view: vk::ImageView::null(),
-        next_id: 0,
-        shader_modules: HashMap::new(),
-        render_pipelines: HashMap::new(),
-        buffers: HashMap::new(),
-        draw_state: DrawState {
-            clear_color: [0.1, 0.1, 0.1, 1.0],
-            draw_commands: vec![],
-            drag_angle: 0.0,
-            rotation_speed: 1.0,
-            scale: 1.0,
-        },
-        input_events: Vec::new(),
+        input_events: vec![],
         webgpu_active: false,
     }));
 
@@ -1491,15 +684,7 @@ fn main() {
         deno_core::extension!(
             scene_ext,
             ops = [
-                op_gpu_create_shader_module,
-                op_gpu_create_render_pipeline,
-                op_gpu_create_buffer,
-                op_gpu_set_clear_color,
-                op_gpu_draw,
-                op_gpu_draw_with_vb,
-                op_gpu_clear_draws,
                 op_gpu_poll_events,
-                op_gpu_set_rotation,
                 op_gpu_set_webgpu_active,
                 op_log
             ]
@@ -1669,43 +854,25 @@ fn main() {
             }
 
             // ---------------------------------------------------------------
-            // 9. Allocate command buffer and fence for render loop
-            // ---------------------------------------------------------------
-            let cmd_alloc_info = vk::CommandBufferAllocateInfo::default()
-                .command_pool(command_pool)
-                .level(vk::CommandBufferLevel::PRIMARY)
-                .command_buffer_count(1);
-
-            let cmd_buf = unsafe {
-                device
-                    .allocate_command_buffers(&cmd_alloc_info)
-                    .expect("Failed to allocate command buffer")[0]
-            };
-
-            let fence_ci = vk::FenceCreateInfo::default();
-            let fence = unsafe {
-                device
-                    .create_fence(&fence_ci, None)
-                    .expect("Failed to create fence")
-            };
-
-            // ---------------------------------------------------------------
-            // 10. Render loop — inside tokio block, JsRuntime alive
+            // 9. Render loop — inside tokio block, JsRuntime alive
             // ---------------------------------------------------------------
             eprintln!("[deno_renderer] Entering render loop (Ctrl+C to exit)...");
 
             let start_time = std::time::Instant::now();
             let mut tab_paused = false;
+            let mut pending_resize: Option<(u32, u32)> = None;
+            let mut resize_deadline: Option<std::time::Instant> = None;
+            const RESIZE_DEBOUNCE_MS: u64 = 150;
 
             while running.load(Ordering::Relaxed) {
                 // Poll for input events from gRPC stream (non-blocking channel drain)
-                let mut resize_event: Option<(u32, u32)> = None;
                 while let Some(ev) = transport.recv_event() {
                     use gpu_share_proto::input_event::Event;
                     match &ev.event {
                         // Check for resize (needs Vulkan handling in Rust)
                         Some(Event::Resize(r)) => {
-                            resize_event = Some((r.width, r.height));
+                            pending_resize = Some((r.width, r.height));
+                            resize_deadline = Some(std::time::Instant::now() + Duration::from_millis(RESIZE_DEBOUNCE_MS));
                         }
                         Some(Event::TabPause(_)) => {
                             tab_paused = true;
@@ -1724,7 +891,11 @@ fn main() {
                 }
 
                 // Handle resize (recreate shared image)
-                if let Some((new_w, new_h)) = resize_event {
+                let should_resize = pending_resize.is_some()
+                    && resize_deadline.map_or(false, |d| std::time::Instant::now() >= d);
+                if should_resize {
+                    let (new_w, new_h) = pending_resize.take().unwrap();
+                    resize_deadline = None;
                     let mut gpu = gpu_state.lock().unwrap();
                     if new_w > 0
                         && new_h > 0
@@ -1732,16 +903,6 @@ fn main() {
                     {
                         unsafe {
                             device.device_wait_idle().expect("device_wait_idle failed");
-
-                            // Destroy old framebuffer + image view
-                            if gpu.framebuffer != vk::Framebuffer::null() {
-                                device.destroy_framebuffer(gpu.framebuffer, None);
-                                gpu.framebuffer = vk::Framebuffer::null();
-                            }
-                            if gpu.image_view != vk::ImageView::null() {
-                                device.destroy_image_view(gpu.image_view, None);
-                                gpu.image_view = vk::ImageView::null();
-                            }
 
                             destroy_shared_image(&device, &mut gpu.shared_img);
                             gpu.shared_img = create_shared_image(
@@ -1752,27 +913,6 @@ fn main() {
                                 new_h,
                                 image_format,
                             );
-
-                            // Recreate image view + framebuffer if we have a pipeline
-                            let first_render_pass = gpu
-                                .render_pipelines
-                                .values()
-                                .next()
-                                .map(|p| p.render_pass);
-                            if let Some(render_pass) = first_render_pass {
-                                gpu.image_view = create_image_view(
-                                    &device,
-                                    gpu.shared_img.image,
-                                    image_format,
-                                );
-                                gpu.framebuffer = create_framebuffer(
-                                    &device,
-                                    render_pass,
-                                    gpu.image_view,
-                                    new_w,
-                                    new_h,
-                                );
-                            }
                         }
 
                         // Re-import shared texture for WebGPU
@@ -1831,30 +971,17 @@ fn main() {
                     }
                 }
 
-                // Render frame
-                {
-                    let gpu = gpu_state.lock().unwrap();
-                    if gpu.webgpu_active {
-                        // WebGPU scene already submitted commands via wgpu-core.
-                        // Use wgpu-core to transition the texture to COPY_SRC
-                        // (= TRANSFER_SRC_OPTIMAL) so the presenter can blit.
-                        // This keeps wgpu-core's layout tracker in sync.
-                        if let Err(e) = wgpu_hal_bridge::prepare_for_present(
-                            &bridge.global,
-                            bridge.device_id,
-                            bridge.queue_id,
-                            current_texture_id,
-                            staging_buffer_id,
-                        ) {
-                            static LOGGED_ERR: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-                            if !LOGGED_ERR.swap(true, Ordering::Relaxed) {
-                                eprintln!("[deno_renderer] prepare_for_present error: {}", e);
-                            }
-                        }
-                    } else {
-                        unsafe {
-                            render_frame(&gpu, cmd_buf, fence, elapsed);
-                        }
+                // Transition shared texture for presenter
+                if let Err(e) = wgpu_hal_bridge::prepare_for_present(
+                    &bridge.global,
+                    bridge.device_id,
+                    bridge.queue_id,
+                    current_texture_id,
+                    staging_buffer_id,
+                ) {
+                    static LOGGED_ERR: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+                    if !LOGGED_ERR.swap(true, Ordering::Relaxed) {
+                        eprintln!("[deno_renderer] prepare_for_present error: {}", e);
                     }
                 }
 
@@ -1864,12 +991,6 @@ fn main() {
                 tokio::time::sleep(Duration::from_millis(sleep_ms)).await;
             }
 
-            // Cleanup cmd_buf and fence inside the block where they were created
-            unsafe {
-                device.device_wait_idle().expect("device_wait_idle failed");
-                device.destroy_fence(fence, None);
-                device.free_command_buffers(command_pool, &[cmd_buf]);
-            }
         });
     }
 
@@ -1887,35 +1008,6 @@ fn main() {
     {
         let mut gpu = gpu_state.lock().unwrap();
         unsafe {
-            // Destroy pipelines
-            for (_id, p) in gpu.render_pipelines.drain() {
-                device.destroy_pipeline(p.pipeline, None);
-                device.destroy_pipeline_layout(p.pipeline_layout, None);
-                device.destroy_render_pass(p.render_pass, None);
-            }
-
-            // Destroy shader modules
-            for (_id, s) in gpu.shader_modules.drain() {
-                if s.module != vk::ShaderModule::null() {
-                    device.destroy_shader_module(s.module, None);
-                }
-            }
-
-            // Destroy buffers
-            for (_id, b) in gpu.buffers.drain() {
-                device.destroy_buffer(b.buffer, None);
-                device.free_memory(b.memory, None);
-            }
-
-            // Destroy framebuffer + image view
-            if gpu.framebuffer != vk::Framebuffer::null() {
-                device.destroy_framebuffer(gpu.framebuffer, None);
-            }
-            if gpu.image_view != vk::ImageView::null() {
-                device.destroy_image_view(gpu.image_view, None);
-            }
-
-            // fence and cmd_buf already cleaned up in tokio block
             destroy_shared_image(&device, &mut gpu.shared_img);
             device.destroy_command_pool(command_pool, None);
             device.destroy_device(None);

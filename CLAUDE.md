@@ -107,19 +107,17 @@ build/presenter/Debug/presenter.exe
 ## What's next
 
 ### Near-term
-- **Remove legacy custom ops** — old `op_gpu_create_shader_module`, `op_gpu_create_render_pipeline`, `op_gpu_draw`, etc. are no longer used by any scene. Remove them and the associated `GpuState` resource tables (shader_modules, render_pipelines, buffers, draw_state).
-- **Clean up dead code** — see `CLEANUP.md` for remaining items (test_renderer/, handle_transport/, renderer_extension/, etc.)
+- **Tab bar UI overlay** — visual indicator of active tab, clickable tab switching
 
 ### Medium-term
-- Resize debouncing (coalesce rapid resize events)
-- Tab bar UI overlay
+- **Sandboxed renderer execution** — run untrusted scene scripts in a sandboxed environment (Deno permissions model or WASM). Restrict file system access, network, and system calls while allowing GPU rendering.
+- **Shared GPU semaphores for frame-perfect sync** — currently the presenter reads the shared image unsynchronized (mailbox model). Add `VK_KHR_external_semaphore` to coordinate renderer writes and presenter reads, eliminating potential tearing.
+- **Performance profiling** — measure and optimize import overhead, frame latency, frame skip rate. Add optional `--perf` flag to log timing data.
 
 ### Long-term
-- Sandboxed renderer execution (WASM or Deno permissions model)
-- Multiple windows / multi-monitor
-- Shared GPU semaphores for frame-perfect sync (currently unsynchronized mailbox)
-- Performance: profile import overhead, frame latency, skip rate
-- Option to keep background tabs rendering at full rate
+- **Multiple windows / multi-monitor** — allow renderers to target different windows or monitors
+- **Keep background tabs rendering** — option to render background tabs at full rate instead of 2fps throttle (for use cases like live previews)
+- **Hot-reload scenes** — watch scene script files for changes and reload without restarting the renderer process
 
 ## Conventions
 - C++ code uses `VK_CHECK` macro for Vulkan errors
