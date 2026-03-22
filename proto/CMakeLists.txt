@@ -16,15 +16,7 @@ find_package(protobuf CONFIG QUIET)
 
 if(gRPC_FOUND AND protobuf_FOUND)
     message(STATUS "Found gRPC and protobuf via CMake CONFIG")
-    # Prefer system PATH protoc over vcpkg protoc (vcpkg's may be blocked
-    # by Windows Application Control policy).
-    find_program(_SYSTEM_PROTOC protoc NO_CMAKE_PATH NO_CMAKE_ENVIRONMENT_PATH NO_CMAKE_SYSTEM_PATH)
-    if(_SYSTEM_PROTOC)
-        set(_PROTOC "${_SYSTEM_PROTOC}")
-        message(STATUS "Using system protoc: ${_SYSTEM_PROTOC}")
-    else()
-        set(_PROTOC $<TARGET_FILE:protobuf::protoc>)
-    endif()
+    set(_PROTOC $<TARGET_FILE:protobuf::protoc>)
     set(_GRPC_CPP_PLUGIN $<TARGET_FILE:gRPC::grpc_cpp_plugin>)
     set(_GRPC_LIBS gRPC::grpc++ protobuf::libprotobuf)
 else()

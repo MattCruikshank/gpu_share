@@ -6,6 +6,7 @@
 #include <condition_variable>
 #include <mutex>
 #include <queue>
+#include <string>
 #include <thread>
 #include <cstdio>
 
@@ -112,7 +113,7 @@ class RendererBridgeServiceImpl final : public gpu_share::RendererBridge::Servic
 public:
     explicit RendererBridgeServiceImpl(BridgeState* state) : state_(state) {}
 
-    grpc::Status RegisterSurface(grpc::ServerContext* /*ctx*/,
+    grpc::Status RegisterSurface(grpc::ServerContext* ctx,
                                 const gpu_share::ConnectRequest* request,
                                 gpu_share::ConnectResponse* response) override {
         uint32_t remotePid = request->renderer_pid();
@@ -130,12 +131,16 @@ public:
             info = protoToSurfaceInfo(request->surface());
         }
 
-        // Clone semaphore handle
-        uint64_t remoteSemHandle = request->semaphore_handle();
+        // Clone semaphore handle (passed via gRPC metadata to avoid proto regeneration)
         SharedSemaphoreHandle localSem = kInvalidSemaphoreHandle;
-        if (remoteSemHandle != 0) {
-            localSem = static_cast<SharedSemaphoreHandle>(cloneHandle(remotePid, remoteSemHandle));
-            fprintf(stderr, "[grpc_server] Cloned semaphore handle\n");
+        auto meta = ctx->client_metadata();
+        auto semIt = meta.find("x-semaphore-handle");
+        if (semIt != meta.end()) {
+            uint64_t remoteSemHandle = std::stoull(std::string(semIt->second.data(), semIt->second.size()));
+            if (remoteSemHandle != 0) {
+                localSem = static_cast<SharedSemaphoreHandle>(cloneHandle(remotePid, remoteSemHandle));
+                fprintf(stderr, "[grpc_server] Cloned semaphore handle\n");
+            }
         }
 
 #ifdef _WIN32

@@ -326,11 +326,17 @@ mod transport {
                 memory_handle: handle as u64,
                 #[cfg(windows)]
                 memory_handle: handle as u64,
-                semaphore_handle: sem_handle as u64,
             };
 
+            // Pass semaphore handle via gRPC metadata (avoids proto regeneration)
+            let mut grpc_req = tonic::Request::new(req);
+            grpc_req.metadata_mut().insert(
+                "x-semaphore-handle",
+                format!("{}", sem_handle as u64).parse().unwrap(),
+            );
+
             let resp = client
-                .register_surface(req)
+                .register_surface(grpc_req)
                 .await
                 .map_err(|e| format!("RegisterSurface RPC failed: {}", e))?;
             let presenter_pid = resp.into_inner().presenter_pid;
