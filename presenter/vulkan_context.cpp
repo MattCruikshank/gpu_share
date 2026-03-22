@@ -218,13 +218,8 @@ bool VulkanContext::createDevice() {
 
     VkPhysicalDeviceFeatures features{};
 
-    VkPhysicalDeviceTimelineSemaphoreFeatures timelineSemFeatures{};
-    timelineSemFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TIMELINE_SEMAPHORE_FEATURES;
-    timelineSemFeatures.timelineSemaphore = VK_TRUE;
-
     VkPhysicalDeviceVulkan12Features vulkan12Features{};
     vulkan12Features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES;
-    vulkan12Features.pNext = &timelineSemFeatures;
     vulkan12Features.timelineSemaphore = VK_TRUE;
 
     VkDeviceCreateInfo createInfo{};
