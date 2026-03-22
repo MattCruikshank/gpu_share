@@ -1,7 +1,7 @@
 {
-  "1": "https://raw.githubusercontent.com/MattCruikshank/gpu_share/refs/heads/main/deno_renderer/scenes/1.ts",
-  "2": "https://raw.githubusercontent.com/MattCruikshank/gpu_share/refs/heads/main/deno_renderer/scenes/2.ts",
-  "3": "https://raw.githubusercontent.com/MattCruikshank/gpu_share/refs/heads/main/deno_renderer/scenes/3.ts",
-  "4": "https://raw.githubusercontent.com/MattCruikshank/gpu_share/refs/heads/main/deno_renderer/scenes/4.ts",
-  "5": "https://raw.githubusercontent.com/MattCruikshank/gpu_share/refs/heads/main/deno_renderer/scenes/5.ts"
+  "1": "scenes/1.ts",
+  "2": "scenes/2.ts",
+  "3": "scenes/3.ts",
+  "4": "scenes/4.ts",
+  "5": "scenes/5.ts"
 }
