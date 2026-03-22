@@ -1934,6 +1934,10 @@ fn main() {
                         // WebGPU scene already submitted commands — just
                         // transition the image to TRANSFER_SRC_OPTIMAL
                         // so the presenter can blit from it.
+                        static LOGGED_BRANCH: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+                        if !LOGGED_BRANCH.swap(true, Ordering::Relaxed) {
+                            eprintln!("[deno_renderer] Using WebGPU render path (transition_for_presenter)");
+                        }
                         unsafe {
                             transition_for_presenter(
                                 &device,
@@ -1944,6 +1948,10 @@ fn main() {
                             );
                         }
                     } else {
+                        static LOGGED_BRANCH2: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+                        if !LOGGED_BRANCH2.swap(true, Ordering::Relaxed) {
+                            eprintln!("[deno_renderer] Using OLD render path (render_frame)");
+                        }
                         unsafe {
                             render_frame(&gpu, cmd_buf, fence, elapsed);
                         }
