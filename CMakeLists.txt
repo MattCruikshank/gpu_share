@@ -32,6 +32,8 @@ if(CARGO_EXE)
     # deno_renderer's build.rs needs protoc for tonic codegen.
     # Prefer system PATH protoc over vcpkg protoc (vcpkg's may be blocked
     # by Windows Application Control policy).
+    # Force re-search every configure (don't use stale cached path).
+    unset(PROTOC_EXE CACHE)
     find_program(PROTOC_EXE protoc NO_CMAKE_PATH NO_CMAKE_ENVIRONMENT_PATH NO_CMAKE_SYSTEM_PATH)
     if(NOT PROTOC_EXE)
         find_program(PROTOC_EXE protoc)
