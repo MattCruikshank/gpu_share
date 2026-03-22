@@ -30,11 +30,12 @@ if(CARGO_EXE)
     endif()
 
     # deno_renderer's build.rs needs protoc for tonic codegen.
-    # GPU_SHARE_PROTOC is set by proto/CMakeLists.txt — it may be a
-    # generator expression ($<TARGET_FILE:protoc>) when using FetchContent,
-    # or a plain path when using system packages.
-    # For cargo's PROTOC env var we need a real path at build time.
-    find_program(PROTOC_EXE protoc)
+    # Prefer system PATH protoc over vcpkg protoc (vcpkg's may be blocked
+    # by Windows Application Control policy).
+    find_program(PROTOC_EXE protoc NO_CMAKE_PATH NO_CMAKE_ENVIRONMENT_PATH NO_CMAKE_SYSTEM_PATH)
+    if(NOT PROTOC_EXE)
+        find_program(PROTOC_EXE protoc)
+    endif()
     if(NOT PROTOC_EXE AND TARGET protoc)
         # FetchContent case: protoc is a build target, use its output path
         set(PROTOC_EXE $<TARGET_FILE:protoc>)
