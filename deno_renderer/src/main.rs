@@ -55,7 +55,8 @@ struct GpuState {
     graphics_queue_family: u32,
     command_pool: vk::CommandPool,
 
-    // Shared exportable image
+    // Double-buffer: scene renders to render_img, then copies to shared_img
+    render_img: SharedImage,
     shared_img: SharedImage,
     image_format: vk::Format,
 
@@ -608,6 +609,11 @@ fn main() {
     };
     eprintln!("[deno_renderer] Shared image created");
 
+    let render_img = unsafe {
+        create_shared_image(&instance, &device, phys_device, initial_width, initial_height, image_format)
+    };
+    eprintln!("[deno_renderer] Render target created (double-buffer)");
+
     // -----------------------------------------------------------------------
     // 6. Build GpuState
     // -----------------------------------------------------------------------
@@ -618,6 +624,7 @@ fn main() {
         graphics_queue,
         graphics_queue_family,
         command_pool,
+        render_img,
         shared_img,
         image_format,
         input_events: vec![],
@@ -641,8 +648,24 @@ fn main() {
     }
     .expect("Failed to create wgpu-hal bridge");
 
-    // Import the initial shared image as a wgpu-core texture
+    // Import the render image as a wgpu-core texture (scene renders here)
     let initial_texture_id = {
+        let gpu = gpu_state.lock().unwrap();
+        unsafe {
+            wgpu_hal_bridge::import_texture(
+                &bridge.global,
+                bridge.device_id,
+                gpu.render_img.image,    // Scene renders to render_img
+                gpu.render_img.width,
+                gpu.render_img.height,
+                wgpu_types::TextureFormat::Rgba8Unorm,
+            )
+        }
+        .expect("Failed to import render texture")
+    };
+
+    // Import the shared image as a second texture (presenter reads here)
+    let initial_shared_texture_id = {
         let gpu = gpu_state.lock().unwrap();
         unsafe {
             wgpu_hal_bridge::import_texture(
@@ -654,7 +677,7 @@ fn main() {
                 wgpu_types::TextureFormat::Rgba8Unorm,
             )
         }
-        .expect("Failed to import initial shared texture")
+        .expect("Failed to import shared texture")
     };
 
     // Staging buffer for prepare_for_present (reused across frames and resizes)
@@ -664,8 +687,9 @@ fn main() {
     )
     .expect("Failed to create staging buffer");
 
-    // Track current texture ID (changes on resize)
-    let mut current_texture_id = initial_texture_id;
+    // Track current texture IDs (change on resize)
+    let mut current_render_texture_id = initial_texture_id;
+    let mut current_shared_texture_id = initial_shared_texture_id;
 
     // -----------------------------------------------------------------------
     // 8. Connect to presenter via gRPC
@@ -856,6 +880,32 @@ fn main() {
             // ---------------------------------------------------------------
             // 9. Render loop — inside tokio block, JsRuntime alive
             // ---------------------------------------------------------------
+            // Frame watchdog: terminate V8 if __frame runs longer than 1 second
+            let isolate_handle = runtime.v8_isolate().thread_safe_handle();
+            let frame_deadline = Arc::new(std::sync::atomic::AtomicU64::new(0));
+            {
+                let deadline = frame_deadline.clone();
+                let handle = isolate_handle.clone();
+                std::thread::spawn(move || {
+                    loop {
+                        std::thread::sleep(Duration::from_millis(10));
+                        let dl = deadline.load(Ordering::Relaxed);
+                        if dl > 0 {
+                            let now = std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .unwrap()
+                                .as_millis() as u64;
+                            if now > dl {
+                                eprintln!("[deno_renderer] WARNING: __frame timed out (>1s), terminating");
+                                handle.terminate_execution();
+                                deadline.store(0, Ordering::Relaxed);
+                            }
+                        }
+                    }
+                });
+            }
+            const FRAME_TIMEOUT_MS: u64 = 1000;
+
             eprintln!("[deno_renderer] Entering render loop (Ctrl+C to exit)...");
 
             let start_time = std::time::Instant::now();
@@ -904,7 +954,16 @@ fn main() {
                         unsafe {
                             device.device_wait_idle().expect("device_wait_idle failed");
 
+                            destroy_shared_image(&device, &mut gpu.render_img);
                             destroy_shared_image(&device, &mut gpu.shared_img);
+                            gpu.render_img = create_shared_image(
+                                &instance,
+                                &device,
+                                phys_device,
+                                new_w,
+                                new_h,
+                                image_format,
+                            );
                             gpu.shared_img = create_shared_image(
                                 &instance,
                                 &device,
@@ -915,8 +974,19 @@ fn main() {
                             );
                         }
 
-                        // Re-import shared texture for WebGPU
-                        let new_texture_id = unsafe {
+                        // Re-import render texture for WebGPU (scene renders here)
+                        let new_render_tid = unsafe {
+                            wgpu_hal_bridge::import_texture(
+                                &bridge.global,
+                                bridge.device_id,
+                                gpu.render_img.image,
+                                new_w,
+                                new_h,
+                                wgpu_types::TextureFormat::Rgba8Unorm,
+                            )
+                        };
+                        // Re-import shared texture (presenter reads here)
+                        let new_shared_tid = unsafe {
                             wgpu_hal_bridge::import_texture(
                                 &bridge.global,
                                 bridge.device_id,
@@ -926,13 +996,14 @@ fn main() {
                                 wgpu_types::TextureFormat::Rgba8Unorm,
                             )
                         };
-                        match new_texture_id {
-                            Ok(tid) => {
-                                current_texture_id = tid;
+                        match (new_render_tid, new_shared_tid) {
+                            (Ok(rtid), Ok(stid)) => {
+                                current_render_texture_id = rtid;
+                                current_shared_texture_id = stid;
                                 let op_state_rc = runtime.op_state();
                                 let mut op_state = op_state_rc.borrow_mut();
                                 op_state.put(deno_webgpu::InjectedTexture {
-                                    texture_id: tid,
+                                    texture_id: rtid,  // Scene gets the render texture
                                     width: new_w,
                                     height: new_h,
                                     format: deno_webgpu::texture::GPUTextureFormat::Rgba8unorm,
@@ -943,7 +1014,7 @@ fn main() {
                                         .bits(),
                                 });
                             }
-                            Err(e) => {
+                            (Err(e), _) | (_, Err(e)) => {
                                 eprintln!("[deno_renderer] Failed to re-import texture: {}", e);
                             }
                         }
@@ -960,28 +1031,44 @@ fn main() {
                     }
                 }
 
-                // Call JS frame callback
+                // Call JS frame callback (with watchdog timeout)
                 let elapsed = start_time.elapsed().as_secs_f32();
                 let frame_code = format!("if(globalThis.__frame)globalThis.__frame({})", elapsed);
+                {
+                    let now_ms = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_millis() as u64;
+                    frame_deadline.store(now_ms + FRAME_TIMEOUT_MS, Ordering::Relaxed);
+                }
                 if let Err(e) = runtime.execute_script("<frame>", frame_code) {
-                    // Log first frame error only to avoid spam
                     static LOGGED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
                     if !LOGGED.swap(true, Ordering::Relaxed) {
                         eprintln!("[deno_renderer] Frame callback error: {}", e);
                     }
                 }
+                frame_deadline.store(0, Ordering::Relaxed);
 
-                // Transition shared texture for presenter
-                if let Err(e) = wgpu_hal_bridge::prepare_for_present(
-                    &bridge.global,
-                    bridge.device_id,
-                    bridge.queue_id,
-                    current_texture_id,
-                    staging_buffer_id,
-                ) {
-                    static LOGGED_ERR: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-                    if !LOGGED_ERR.swap(true, Ordering::Relaxed) {
-                        eprintln!("[deno_renderer] prepare_for_present error: {}", e);
+                // Copy render target -> shared image, then transition for presenter
+                {
+                    let gpu = gpu_state.lock().unwrap();
+                    let w = gpu.render_img.width;
+                    let h = gpu.render_img.height;
+                    drop(gpu);
+                    if let Err(e) = wgpu_hal_bridge::copy_and_present(
+                        &bridge.global,
+                        bridge.device_id,
+                        bridge.queue_id,
+                        current_render_texture_id,
+                        current_shared_texture_id,
+                        w,
+                        h,
+                        staging_buffer_id,
+                    ) {
+                        static LOGGED_ERR: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+                        if !LOGGED_ERR.swap(true, Ordering::Relaxed) {
+                            eprintln!("[deno_renderer] copy_and_present error: {}", e);
+                        }
                     }
                 }
 
@@ -1008,6 +1095,7 @@ fn main() {
     {
         let mut gpu = gpu_state.lock().unwrap();
         unsafe {
+            destroy_shared_image(&device, &mut gpu.render_img);
             destroy_shared_image(&device, &mut gpu.shared_img);
             device.destroy_command_pool(command_pool, None);
             device.destroy_device(None);

@@ -59,10 +59,10 @@ Presenter (C++, SDL3 + Vulkan, multi-tab)
 - Rust, headless Vulkan via ash, TypeScript via deno_core (V8), gRPC client via tonic
 - **Standard WebGPU API** via forked deno_webgpu (from Deno v2.7.7, wgpu-core 28)
 - `wgpu_hal_bridge.rs` wraps ash Vulkan objects as wgpu-core Global/Adapter/Device
-- Shared VkImage imported as wgpu-core Texture via `create_texture_from_hal`
-- `prepare_for_present()` uses wgpu-core command encoder to transition shared texture to COPY_SRC (= TRANSFER_SRC_OPTIMAL) after each frame, keeping wgpu-core's layout tracker in sync
+- **Double-buffer**: scene renders to an internal VkImage, then `copy_and_present()` copies it to the shared image for the presenter. The shared image is only written during the copy (microseconds), not during the entire render.
+- **Frame watchdog**: V8 `terminate_execution()` kills `__frame` if it runs >1 second (infinite-loop protection)
+- **GPU resource limits**: `wgpu_types::Limits` caps texture sizes (4096), buffer sizes (256MB), bind groups (4)
 - Scene scripts use standard WebGPU API: `createShaderModule`, `createRenderPipeline`, `beginRenderPass`, `queue.submit`
-- Legacy custom ops (`op_gpu_create_shader_module`, etc.) still present for backward compatibility
 - Per-frame JS callback (`globalThis.__frame`) receives elapsed time
 - `op_gpu_poll_events` returns length-prefixed protobuf bytes → decoded in TS via `proto.decodeEvents()`
 - `webgpu_shim.js` bootstraps `navigator.gpu` + `GPUBufferUsage` in bare V8

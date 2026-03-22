@@ -109,7 +109,14 @@ pub unsafe fn create_bridge(
     let device_desc = wgpu_core::device::DeviceDescriptor {
         label: None,
         required_features: device_features,
-        required_limits: wgt::Limits::default(),
+        required_limits: wgt::Limits {
+            max_texture_dimension_2d: 4096,
+            max_buffer_size: 256 * 1024 * 1024,
+            max_storage_buffer_binding_size: 128 * 1024 * 1024,
+            max_uniform_buffer_binding_size: 64 * 1024,
+            max_bind_groups: 4,
+            ..wgt::Limits::default()
+        },
         experimental_features: wgt::ExperimentalFeatures::default(),
         memory_hints: wgt::MemoryHints::Performance,
         trace: wgt::Trace::Off,
@@ -294,6 +301,122 @@ pub fn prepare_for_present(
     }
     if let Some((_, err)) = global.queue_submit(queue_id, &[cmd_buf_id]).err() {
         return Err(format!("Failed to submit present transition: {err}"));
+    }
+
+    // 4. Wait for GPU completion
+    global
+        .device_poll(device_id, wgt::PollType::wait_indefinitely())
+        .map_err(|e| format!("device_poll failed: {e}"))?;
+
+    Ok(())
+}
+
+/// Copy the render target to the shared present image, then transition the
+/// present image to COPY_SRC (= TRANSFER_SRC_OPTIMAL) for the presenter.
+///
+/// This is the double-buffer version of `prepare_for_present`: the scene
+/// renders to `render_texture_id` (internal), and we copy to
+/// `present_texture_id` (shared with presenter) in a single command encoder.
+pub fn copy_and_present(
+    global: &wgpu_core::global::Global,
+    device_id: DeviceId,
+    queue_id: QueueId,
+    render_texture_id: TextureId,
+    present_texture_id: TextureId,
+    width: u32,
+    height: u32,
+    staging_buffer_id: BufferId,
+) -> Result<(), String> {
+    let (encoder_id, err) = global.device_create_command_encoder(
+        device_id,
+        &wgt::CommandEncoderDescriptor {
+            label: Some(std::borrow::Cow::Borrowed("copy_and_present")),
+        },
+        None,
+    );
+    if let Some(err) = err {
+        return Err(format!("Failed to create command encoder: {err}"));
+    }
+
+    // 1. Full copy: render target → present image
+    let copy_src = wgt::TexelCopyTextureInfo {
+        texture: render_texture_id,
+        mip_level: 0,
+        origin: wgt::Origin3d::ZERO,
+        aspect: wgt::TextureAspect::All,
+    };
+    let copy_dst = wgt::TexelCopyTextureInfo {
+        texture: present_texture_id,
+        mip_level: 0,
+        origin: wgt::Origin3d::ZERO,
+        aspect: wgt::TextureAspect::All,
+    };
+    let full_size = wgt::Extent3d {
+        width,
+        height,
+        depth_or_array_layers: 1,
+    };
+    if let Some(err) = global
+        .command_encoder_copy_texture_to_texture(encoder_id, &copy_src, &copy_dst, &full_size)
+        .err()
+    {
+        return Err(format!("Failed to record texture copy: {err}"));
+    }
+
+    // 2. Finish + submit the copy
+    let (cmd_buf_id, maybe_err) =
+        global.command_encoder_finish(encoder_id, &wgt::CommandBufferDescriptor::default(), None);
+    if let Some((_label, err)) = maybe_err {
+        return Err(format!("Failed to finish copy encoder: {err}"));
+    }
+    if let Some((_, err)) = global.queue_submit(queue_id, &[cmd_buf_id]).err() {
+        return Err(format!("Failed to submit copy: {err}"));
+    }
+
+    // 3. Transition present image to COPY_SRC (= TRANSFER_SRC_OPTIMAL)
+    //    by copying 1 pixel to the staging buffer
+    let (enc2, err) = global.device_create_command_encoder(
+        device_id,
+        &wgt::CommandEncoderDescriptor {
+            label: Some(std::borrow::Cow::Borrowed("present_transition")),
+        },
+        None,
+    );
+    if let Some(err) = err {
+        return Err(format!("Failed to create transition encoder: {err}"));
+    }
+    let px_src = wgt::TexelCopyTextureInfo {
+        texture: present_texture_id,
+        mip_level: 0,
+        origin: wgt::Origin3d::ZERO,
+        aspect: wgt::TextureAspect::All,
+    };
+    let px_dst = wgt::TexelCopyBufferInfo {
+        buffer: staging_buffer_id,
+        layout: wgt::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(256),
+            rows_per_image: None,
+        },
+    };
+    let px_size = wgt::Extent3d {
+        width: 1,
+        height: 1,
+        depth_or_array_layers: 1,
+    };
+    if let Some(err) = global
+        .command_encoder_copy_texture_to_buffer(enc2, &px_src, &px_dst, &px_size)
+        .err()
+    {
+        return Err(format!("Failed to record transition copy: {err}"));
+    }
+    let (cmd2, maybe_err) =
+        global.command_encoder_finish(enc2, &wgt::CommandBufferDescriptor::default(), None);
+    if let Some((_label, err)) = maybe_err {
+        return Err(format!("Failed to finish transition encoder: {err}"));
+    }
+    if let Some((_, err)) = global.queue_submit(queue_id, &[cmd2]).err() {
+        return Err(format!("Failed to submit transition: {err}"));
     }
 
     // 4. Wait for GPU completion
