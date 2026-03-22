@@ -102,15 +102,15 @@ build/presenter/Debug/presenter.exe
 
 ## What's next
 
-### Near-term
-- Integrate wgpu-core so TypeScript gets the real WebGPU API (not just our custom ops)
-  - Use `Global::from_hal_instance()` to wrap our ash Instance
-  - `CreateDeviceCallback` to inject external memory extensions
-  - `create_texture_from_hal()` to wrap the exportable image as a WebGPU texture
-  - TypeScript owns the render loop via `requestAnimationFrame`-style callback
+### Near-term (active)
+- **WebGPU via forked deno_webgpu** — see `deno_webgpu_plan.md` for full plan
+  - Fork deno_webgpu (~9,250 lines) with ~80 lines of modifications
+  - wgpu-hal bridge wraps our ash Vulkan objects as wgpu-core objects
+  - Inject pre-created Instance/Adapter/Device into deno_webgpu's OpState
+  - Scene scripts use standard WebGPU API instead of custom ops
+  - Keep existing custom ops during transition
 
 ### Medium-term
-- Renderer crash recovery (detect dead process, show placeholder, re-launch)
 - Resize debouncing (coalesce rapid resize events)
 - Tab bar UI overlay
 
@@ -123,7 +123,7 @@ build/presenter/Debug/presenter.exe
 
 ## Conventions
 - C++ code uses `VK_CHECK` macro for Vulkan errors
-- Rust code uses `ash` for Vulkan, `naga` for WGSL compilation, `deno_core` for V8
+- Rust code uses `ash` for Vulkan, `naga` for WGSL compilation, `deno_core` for V8 (transitioning to wgpu + deno_webgpu for WebGPU API)
 - gRPC base port 9710, each tab uses `9710 + tab_index`
 - `--port` / `-p` overrides the base port
 - Proto schema is the single source of truth for wire types (`proto/gpu_share.proto`)
