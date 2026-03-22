@@ -1045,6 +1045,12 @@ unsafe fn transition_for_presenter(
     fence: vk::Fence,
     image: vk::Image,
 ) {
+    // Wait for wgpu-core's queue submission to complete on the GPU.
+    // wgpu-core uses relay semaphores between submissions, and our raw
+    // vkQueueSubmit doesn't participate in that chain. QueueWaitIdle
+    // ensures all prior GPU work is done before our barrier.
+    device.queue_wait_idle(queue).expect("queue_wait_idle failed");
+
     device
         .reset_command_buffer(cmd_buf, vk::CommandBufferResetFlags::empty())
         .expect("Failed to reset command buffer");
@@ -1055,16 +1061,13 @@ unsafe fn transition_for_presenter(
         .begin_command_buffer(cmd_buf, &begin_info)
         .expect("Failed to begin command buffer");
 
-    // Transition from UNDEFINED (we don't know what wgpu-core left it as)
-    // to TRANSFER_SRC_OPTIMAL (what the presenter expects).
-    // Using UNDEFINED as old_layout means we don't care about preserving
-    // contents from a previous layout — but the image WAS just rendered to,
-    // so the GPU has the data. The barrier ensures the render writes are
-    // visible before the presenter reads.
+    // wgpu-core's render pass leaves the image in COLOR_ATTACHMENT_OPTIMAL.
+    // The presenter expects TRANSFER_SRC_OPTIMAL for blitting.
+    // We use a full pipeline barrier to ensure all writes are complete.
     let barrier = vk::ImageMemoryBarrier::default()
-        .src_access_mask(vk::AccessFlags::COLOR_ATTACHMENT_WRITE | vk::AccessFlags::TRANSFER_WRITE)
+        .src_access_mask(vk::AccessFlags::MEMORY_WRITE)
         .dst_access_mask(vk::AccessFlags::TRANSFER_READ)
-        .old_layout(vk::ImageLayout::GENERAL)
+        .old_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
         .new_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL)
         .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
         .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
@@ -1079,7 +1082,7 @@ unsafe fn transition_for_presenter(
 
     device.cmd_pipeline_barrier(
         cmd_buf,
-        vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT | vk::PipelineStageFlags::TRANSFER,
+        vk::PipelineStageFlags::ALL_COMMANDS,
         vk::PipelineStageFlags::TRANSFER,
         vk::DependencyFlags::empty(),
         &[],
